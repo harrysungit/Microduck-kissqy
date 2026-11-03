@@ -558,6 +558,16 @@ pub(crate) mod tests {
                 imu_age_ms: Some(2),
                 imu_age_upper_bound_ms: Some(3),
                 imu_status: Some(0),
+                imu_raw: Some(feetech_snapshot::BusImuRawSample {
+                    block: [1, 0, 255, 255, 0, 0, 0, 48, 0, 0, 0, 0],
+                    sequence: Some(123),
+                    status: Some(0),
+                    age_ms: None,
+                    age_upper_bound_ms: Some(30),
+                    host_read_start_us: cycle.saturating_mul(20_000),
+                    transaction_us: 4_700,
+                    read_index: cycle,
+                }),
                 imu_reader: None,
                 command_clamps_total: 1,
                 partial_samples_total: 2,
@@ -779,6 +789,8 @@ pub(crate) mod tests {
             .unwrap()
             .report();
         assert_eq!(report["cycle"], 3);
+        assert_eq!(report["native"]["imu_raw"]["read_index"], 3);
+        assert_eq!(report["native"]["imu_raw"]["block"][2], 255);
         assert_eq!(report["native"]["joints"][0]["name"], proto::JOINT_NAMES[0]);
         assert_eq!(report["native"]["joints"][0]["missing_total"], u64::MAX);
         task.abort();

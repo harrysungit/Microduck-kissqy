@@ -441,6 +441,8 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// # v42 — independent startup bus-IMU observations
 /// `robot.busStatus.native.imu_observation` is diagnostic evidence even when servo
 /// startup refuses motion. Install matching control.47 and Studio for this display.
+/// Optional native.imu_raw adds original bus bytes to bus/raw telemetry; collecting
+/// bytes requires a robotd build with this field. Version skew remains serveable.
 pub const API_VERSION: u32 = 42;
 
 /// The observation width every policy this robot family runs is built against.

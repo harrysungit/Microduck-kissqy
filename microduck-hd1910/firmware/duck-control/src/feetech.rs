@@ -1766,6 +1766,8 @@ pub struct FeetechDiagnostics {
     pub imu_age_ms: Option<u16>,
     pub imu_age_upper_bound_ms: Option<u16>,
     pub imu_status: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imu_raw: Option<crate::feetech_snapshot::BusImuRawSample>,
     /// Which trunk IMU this is: a [`TrunkImuKind`] label. `imu_mount_verified`, `imu_ready`
     /// and the `imu_*` figures above are that source's.
     pub imu_source: &'static str,
@@ -1913,6 +1915,8 @@ pub struct FeetechIo {
     latest_ready: bool,
     latest_slow: Option<SlowSensors>,
     latest_sample_at: Option<Instant>,
+    raw_time_origin: Instant,
+    latest_raw_imu: Option<crate::feetech_snapshot::BusImuRawSample>,
     joint_feedback: [Option<JointFeedback>; NUM_JOINTS],
     joint_missing: [u32; NUM_JOINTS],
     joint_missing_total: [u64; NUM_JOINTS],
@@ -2022,6 +2026,8 @@ impl FeetechIo {
             latest_ready: false,
             latest_slow: None,
             latest_sample_at: None,
+            raw_time_origin: Instant::now(),
+            latest_raw_imu: None,
             joint_feedback: std::array::from_fn(|_| None),
             joint_missing: [0; NUM_JOINTS],
             joint_missing_total: [0; NUM_JOINTS],
@@ -2325,6 +2331,19 @@ impl FeetechIo {
             self.partial_samples_total = self.partial_samples_total.saturating_add(1);
         }
         self.latest_sample_at = Some(started); // current IMU/control sample, not every joint
+        self.latest_raw_imu = raw_imu.as_ref().map(|raw| {
+            crate::feetech_snapshot::BusImuRawSample {
+                block: raw.block,
+                sequence: raw.sequence,
+                status: raw.status,
+                age_ms: raw.age_ms,
+                age_upper_bound_ms: raw.age_upper_bound_ms,
+                host_read_start_us: started.duration_since(self.raw_time_origin)
+                    .as_micros().min(u64::MAX.into()) as u64,
+                transaction_us: self.telemetry_sync.elapsed_us,
+                read_index: self.telemetry.total_reads,
+            }
+        });
         self.latest_native_positions = Some(raws);
         self.latest_joints = joints;
         match &mut self.imu {
@@ -2572,6 +2591,7 @@ impl RobotIo for FeetechIo {
             imu_age_ms,
             imu_age_upper_bound_ms,
             imu_status,
+            imu_raw: self.latest_raw_imu,
             imu_source: self.imu.kind().label(),
             imu_bus: self.bus.imu_info(),
             imu_reader: self.imu.reader_health(),
@@ -2655,6 +2675,7 @@ impl RobotIo for FeetechIo {
                 imu_age_ms,
                 imu_age_upper_bound_ms,
                 imu_status,
+                imu_raw: self.latest_raw_imu,
                 imu_reader: self.imu.reader_health(),
                 command_clamps_total: self.command_clamps_total,
                 partial_samples_total: self.partial_samples_total,
@@ -3001,6 +3022,7 @@ mod tests {
                     match (id, address) {
                         (IMU_ID, 0) => data.copy_from_slice(&IMU_IDENTITY),
                         (IMU_ID, 56) => {
+                            data[..2].copy_from_slice(&i16::from(sequence).to_le_bytes());
                             data[7] = 0x30;
                             data[12] = sequence;
                         }
@@ -3040,15 +3062,32 @@ mod tests {
             last_imu_response_at: None,
         };
         let mut io = FeetechIo::from_bus(bus, calibrated()).unwrap();
+        let before_raw = serde_json::to_value(io.feetech_snapshot().unwrap().dynamic).unwrap();
+        assert!(before_raw.get("imu_raw").is_none());
+        let mut reference_decoder = SflpDecoder::new(calibrated().imu_mount_quat);
         for _ in 0..30 {
-            io.read().unwrap();
+            let sensors = io.read().unwrap();
+            let wire = serde_json::to_value(io.feetech_snapshot().unwrap().dynamic).unwrap();
+            let raw = &wire["imu_raw"];
+            assert!(raw.is_object(), "accepted bus sample must expose its original bytes");
+            let block: [u8; 12] = serde_json::from_value(raw["block"].clone()).unwrap();
+            let sequence = raw["sequence"].as_u64().unwrap() as u8;
+            assert_eq!(i16::from_le_bytes([block[0], block[1]]), i16::from(sequence));
+            assert_eq!(block[7], 0x30);
+            // Observability must not change the decoder or its three-sample history.
+            assert_eq!(sensors.imu, reference_decoder.decode(&block));
+            assert!(raw["host_read_start_us"].is_u64());
+            assert!(raw["transaction_us"].is_u64());
         }
         assert!(io.imu_ready());
         io.set_torque(true).unwrap();
         let reads_before = io.telemetry.total_reads;
         drop_read.store(true, Ordering::Relaxed);
         let last = io.latest_sample_at;
+        let raw_before_loss = serde_json::to_value(io.feetech_snapshot().unwrap().dynamic).unwrap()["imu_raw"].clone();
         assert!(io.read().is_err());
+        let raw_after_loss = serde_json::to_value(io.feetech_snapshot().unwrap().dynamic).unwrap()["imu_raw"].clone();
+        assert_eq!(raw_after_loss, raw_before_loss, "loss must not replace or retimestamp the accepted raw sample");
         let totals = io.feetech_diagnostics().unwrap().telemetry;
         assert_eq!(
             (totals.total_reads, totals.failed_reads),
@@ -3077,6 +3116,7 @@ mod tests {
         assert_eq!(goals.load(Ordering::Relaxed) - before, NUM_JOINTS);
         assert_eq!(io.torque_state_confirmed, Some(false));
         for _ in 0..3 {
+            let _snapshot = io.feetech_snapshot().unwrap();
             let diagnostic = io.feetech_diagnostics().unwrap();
             assert_eq!(diagnostic.sync.address, 56);
             assert_eq!(diagnostic.sync.missing_ids.len(), 16);
@@ -4234,7 +4274,9 @@ mod hd1910_transport_tests {
             let wire = serde_json::to_value(&diagnostics).unwrap();
             assert_eq!(wire["imu_source"], kind.label());
             assert_eq!(wire["imu_reader"]["state"], "streaming");
+            assert!(wire.get("imu_raw").is_none(), "host IMU must not invent bus bytes");
             let snapshot = io.feetech_snapshot().unwrap();
+            assert!(snapshot.dynamic.imu_raw.is_none());
             assert_eq!(snapshot.metadata.imu_source, kind.label());
             assert_eq!(
                 snapshot.dynamic.imu_reader.unwrap().state,

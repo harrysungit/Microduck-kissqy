@@ -7189,6 +7189,7 @@ mod tests {
                         imu_age_ms: None,
                         imu_age_upper_bound_ms: None,
                         imu_status: None,
+                        imu_raw: None,
                         imu_reader: None,
                         command_clamps_total: 0,
                         partial_samples_total: 0,

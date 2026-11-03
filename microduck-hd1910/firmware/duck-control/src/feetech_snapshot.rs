@@ -127,6 +127,8 @@ pub struct Dynamic {
     pub imu_age_upper_bound_ms: Option<u16>,
     pub imu_status: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub imu_raw: Option<BusImuRawSample>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub imu_reader: Option<crate::trunk_imu::HostImuHealth>,
     pub command_clamps_total: u64,
     pub partial_samples_total: u64,
@@ -137,6 +139,22 @@ pub struct Dynamic {
     pub sync: SyncTrace,
     pub telemetry: TelemetryTotals,
     pub hd1910: HdState,
+}
+
+/// Original core bytes of the last accepted bus sample, before mounting or medians.
+/// Copying the normal transaction adds no serial traffic and does not feed control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct BusImuRawSample {
+    pub block: [u8; crate::imu::IMU_BLOCK_LEN],
+    pub sequence: Option<u32>,
+    pub status: Option<u8>,
+    pub age_ms: Option<u16>,
+    pub age_upper_bound_ms: Option<u16>,
+    /// Host monotonic time since this FeetechIo opened, NOT the sensor's sample time.
+    pub host_read_start_us: u64,
+    pub transaction_us: u64,
+    /// Telemetry attempt number that accepted these bytes. Unchanged after read loss.
+    pub read_index: u64,
 }
 
 #[derive(Debug, Clone)]

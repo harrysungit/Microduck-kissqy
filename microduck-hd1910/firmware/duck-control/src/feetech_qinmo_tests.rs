@@ -160,6 +160,8 @@ fn model_delivery(delay: Duration, answer: bool, delivery: Delivery) -> (Bus, Sp
         imu_protocol: BusImuProtocol::Auto,
         imu_profile: BusImuProfile::Legacy,
         imu_identity: None,
+        full_q4: false,
+        full_q4_verified: false,
             observations: observations::Observations::default(),
             last_imu_response_at: None,
     };

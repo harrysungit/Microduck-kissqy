@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::oneshot;
 
-pub const BUILD: &str = "0791fcd-feetech-imu-rawdiag.1";
+pub const BUILD: &str = "82aec98-fullq4-candidate.1";
 const MAX_PENDING: usize = 16;
 const POSITION_TOLERANCE: u16 = 8;
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(4);
@@ -1407,6 +1407,7 @@ pub async fn run(
     port: &str,
     imu_protocol: &str,
     imu_profile: &str,
+    imu_quaternion: &str,
     state: &RobotState,
     period: Duration,
     calibration_path: &Path,
@@ -1441,6 +1442,11 @@ pub async fn run(
                 .map_err(|e| e.to_string())?;
             bus.set_imu_profile(imu_profile)
                 .map_err(|e| e.to_string())?;
+            bus.set_imu_quaternion(imu_quaternion)
+                .map_err(|e| e.to_string())?;
+            if host_imu.is_some() && bus.full_q4_enabled() {
+                return Err("full_q4_v1 requires the bus IMU".into());
+            }
             let initialized = (|| -> Result<(), String> {
                 torque_off(&mut bus, &ids)?;
                 if host_imu.is_none() {
@@ -2762,6 +2768,7 @@ mod tests {
                 .block_on(run(
                     &port,
                     "auto",
+                    "legacy",
                     "legacy",
                     &control_state,
                     Duration::from_millis(20),

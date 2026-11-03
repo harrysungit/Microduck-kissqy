@@ -117,6 +117,11 @@ pub const REGISTRY: &[Entry] = &[
         "Saved IMU data profile on native Feetech; change with robotd stopped, then verify the mounting again",
     ),
     entry(
+        "bus.imu_quaternion",
+        Kind::Choice(&["legacy", "full_q4_v1"]),
+        "IMU quaternion wire format; full_q4_v1 requires the matching MD firmware descriptor",
+    ),
+    entry(
         "bus.feetech_calibration",
         Kind::OptionalPath,
         "Mounted Feetech calibration",

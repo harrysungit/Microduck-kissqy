@@ -88,12 +88,18 @@ fn connect(
     host: bool,
     imu_protocol: &str,
     imu_profile: &str,
+    imu_quaternion: &str,
 ) -> Result<(Bus, Vec<Value>), String> {
     let mut bus = Bus::open_read_only(port).map_err(|e| e.to_string())?;
     bus.set_imu_protocol(imu_protocol)
         .map_err(|e| e.to_string())?;
     bus.set_imu_profile(imu_profile)
         .map_err(|e| e.to_string())?;
+    bus.set_imu_quaternion(imu_quaternion)
+        .map_err(|e| e.to_string())?;
+    if host && bus.full_q4_enabled() {
+        return Err("full_q4_v1 requires the bus IMU".into());
+    }
     if !host {
         bus.identify_imu().map_err(|e| e.to_string())?;
     }
@@ -138,6 +144,7 @@ pub async fn run(
     port: &str,
     imu_protocol: &str,
     imu_profile: &str,
+    imu_quaternion: &str,
     state: &RobotState,
     period: Duration,
     host_imu: Option<&dyn HostImu>,
@@ -154,7 +161,7 @@ pub async fn run(
         if state.shutdown.load(Ordering::Relaxed) {
             return;
         }
-        match connect(port, host_imu.is_some(), imu_protocol, imu_profile) {
+        match connect(port, host_imu.is_some(), imu_protocol, imu_profile, imu_quaternion) {
             Ok(connected) => break connected,
             Err(error) => {
                 attempt += 1;
@@ -174,7 +181,11 @@ pub async fn run(
     };
     if host_imu.is_none() {
         // FT6 answers first, our imu_to_dxl board last (Bus::identify_imu read which one in connect)
-        ids = duck_control::feetech::telemetry_ids(bus.imu_board(), &JOINT_IDS);
+        ids = if bus.full_q4_enabled() {
+            JOINT_IDS.to_vec()
+        } else {
+            duck_control::feetech::telemetry_ids(bus.imu_board(), &JOINT_IDS)
+        };
     }
     state.startup_bus_failures.store(0, Ordering::Relaxed);
     tracing::warn!(
@@ -271,6 +282,18 @@ pub async fn run(
                             "bus":bus.imu_info(),
                             "gyro_rad_s":reading.gyro, "quaternion_wxyz":reading.quat,
                             "payload_12_hex": imu.block.iter().map(|b| format!("{b:02x}")).collect::<String>()});
+                            if let Some(full) = imu.full {
+                                imu_json.as_object_mut().unwrap().remove("payload_12_hex");
+                                imu_json["sequence_bits"] = json!(32);
+                                imu_json["full_raw"] = json!(
+                                    duck_control::feetech_snapshot::BusImuFullRawSample::new(
+                                        full,
+                                        state.started.elapsed().as_micros() as u64 - read_us,
+                                        read_us,
+                                        cycle
+                                    )
+                                );
+                            }
                         }
                         Err(error) => {
                             state.imu_ready.store(false, Ordering::Relaxed);
@@ -600,6 +623,7 @@ mod tests {
                 &path,
                 "auto",
                 if qinmo { "qinmo" } else { "legacy" },
+                "legacy",
                 &worker_state,
                 Duration::from_millis(5),
                 None,

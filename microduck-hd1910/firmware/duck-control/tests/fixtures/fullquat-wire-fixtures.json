@@ -1,0 +1,9 @@
+{"source":"C control_table.c serializer, mocked sensor input; no hardware","descriptor_hex":"51340101c81c7800","samples":[
+{"name":"negative_w","fullblock_hex":"0080ff7fffff00bc000000000000feffffff00deffff020003000001","gyro_raw":[-32768,32767,-1],"quat_raw":[48128,0,0,0],"sequence":4294967294,"timestamp_us":4294958592,"gyro_age_ms":2,"quat_age_ms":3,"status":0},
+{"name":"identical_fresh","fullblock_hex":"0080ff7fffff00bc000000000000ffffffff8dfeffff020003000001","gyro_raw":[-32768,32767,-1],"quat_raw":[48128,0,0,0],"sequence":4294967295,"timestamp_us":4294966925,"gyro_age_ms":2,"quat_age_ms":3,"status":0},
+{"name":"sequence_and_timestamp_wrap","fullblock_hex":"0080ff7fffff00bc000000000000000000001a1f0000020003000001","gyro_raw":[-32768,32767,-1],"quat_raw":[48128,0,0,0],"sequence":0,"timestamp_us":7962,"gyro_age_ms":2,"quat_age_ms":3,"status":0},
+{"name":"zero_w","fullblock_hex":"0080ff7fffff0000003c0000000001000000a73f0000020003000001","gyro_raw":[-32768,32767,-1],"quat_raw":[0,15360,0,0],"sequence":1,"timestamp_us":16295,"gyro_age_ms":2,"quat_age_ms":3,"status":0},
+{"name":"negative_zero_w","fullblock_hex":"0080ff7fffff0080003c000000000200000034600000020003000001","gyro_raw":[-32768,32767,-1],"quat_raw":[32768,15360,0,0],"sequence":2,"timestamp_us":24628,"gyro_age_ms":2,"quat_age_ms":3,"status":0},
+{"name":"stale","fullblock_hex":"0080ff7fffff0080003c0000000002000000346000006400ffff0101","gyro_raw":[-32768,32767,-1],"quat_raw":[32768,15360,0,0],"sequence":2,"timestamp_us":24628,"gyro_age_ms":100,"quat_age_ms":65535,"status":1},
+{"name":"acquisition_failed","fullblock_hex":"0080ff7fffff0080003c0000000002000000346000006400ffff0301","gyro_raw":[-32768,32767,-1],"quat_raw":[32768,15360,0,0],"sequence":2,"timestamp_us":24628,"gyro_age_ms":100,"quat_age_ms":65535,"status":3}
+]}

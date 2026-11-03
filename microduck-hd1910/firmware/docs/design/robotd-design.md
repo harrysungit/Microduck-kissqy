@@ -735,6 +735,53 @@ separate calibration slots. The configuration and metadata are additive; IPC API
 is 41 with the independent startup observations below; version skew itself is never a blanket refusal. A Qinmo selection requires
 a matching runtime binary. [Selection and verification guide](../robot/qinmo-imu.md).
 
+**Optional full quaternion candidate.** `[bus] imu_quaternion = "legacy"` remains the
+default. To enable the offline full-Q4 candidate, install the matching robotd API 42 build
+and MD MCU firmware with its full-Q4 feature enabled, then use:
+
+```toml
+[bus]
+protocol = "feetech"
+imu_protocol = "feetech" # "auto" also allows the MD Feetech identity
+imu_quaternion = "full_q4_v1"
+[trunk_imu]
+source = "bus"
+```
+
+Merge these keys into the existing startup file, preserving its UART, calibration and other
+settings, then explicitly restart robotd. Normal, read-only and commissioning modes all
+honor the setting. Startup requires the own MD model `44 4d` with endian byte zero and the
+exact descriptor `51 34 01 01 c8 1c 78 00` at 186/8. Missing/unknown descriptors, FT6,
+DXL2 and host I²C combinations refuse this mode. An invalid full sample never falls back
+to the legacy reconstruction. Set `imu_quaternion = "legacy"` (or remove the key) and
+restart to disable it; the enabled MCU retains the legacy block. Before installing an
+older robotd, remove this new key. API skew continues to be logged and served; older
+capture clients without full-Q4 support cannot capture the new payload correctly.
+
+The same bus owner reads ID 200 at 200/28 first, then all fifteen servos at 56/15 with
+ID 200 omitted from Sync Read. Both operations share one absolute 20 ms deadline. The
+block contains gyro i16 LE x/y/z (17.5 mdps/LSB), signed binary16 w/x/y/z, a wrapping
+u32 accepted-quaternion sequence, wrapping u32 MCU ENDOP capture microseconds (not chip
+time), u16 gyro and quaternion ages in milliseconds, status, and format byte 1. Every
+nonzero status is invalid. Finite quaternion norm squared must be in [0.98, 1.02] before
+normalization; the existing mount, ready gate and three-point median are applied once.
+Neither model parameters nor gains, ranges or gyro fusion change.
+
+Both ages plus the entire host transaction must fit 50 ms. A repeated sequence also ages
+from its first accepted host time and cannot refresh itself by repeating ages or bytes.
+Stationary identical quaternions with advancing sequence/time are valid. Counter/time
+wrap is accepted using unsigned half-range ordering; backwards/restarted counters are
+refused until an explicit reopen/restart, which rechecks the descriptor.
+
+Motion snapshots and the unchanged `r17.raw.v1` framing expose `native.imu_full_raw`:
+`mode`, exact `descriptor`, actual 28-byte `block`, `sequence`, `timestamp_us`,
+`gyro_age_ms`, `quat_age_ms`, `status`, `read_index`, `host_read_start_us` (since the bus
+owner opened), and `transaction_us` (both reads). `native.imu_raw` is absent in full mode.
+Failed cycles preserve the last accepted bytes, timestamp and index. Host I²C sources
+expose neither raw bus field. `scripts/capture_bus_imu_raw.py` accepts either actual
+format and refuses missing or inconsistent data. This candidate has offline fixture,
+fake-serial and cross-build validation only; installing/flashing it is a separate operation.
+
 **A module is read by a thread, not by the tick.** `robotd/src/trunk_imu_i2c.rs` owns the
 i2c-dev file and runs one state machine per chip on the codecs in `duck-control`
 (`bno08x`: soft reset, product ID, game rotation vector and calibrated gyro at 100 Hz;

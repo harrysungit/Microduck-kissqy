@@ -40,6 +40,20 @@ def read_frame(stream):
 
 def validate_bus(bus):
     native = bus.get('native', {})
+    if native.get('imu_full_raw') is not None:
+        raw = native['imu_full_raw']
+        if (native.get('imu_source') != 'bus' or native.get('imu_raw') is not None
+                or raw.get('mode') != 'full_q4_v1'
+                or raw.get('descriptor') != [0x51,0x34,1,1,200,28,120,0]):
+            raise ValueError('invalid imu_full_raw mode/descriptor/source')
+        block = raw.get('block')
+        if not isinstance(block, list) or len(block) != 28 or any(type(v) is not int or not 0 <= v <= 255 for v in block):
+            raise ValueError('actual 28 imu_full_raw bytes unavailable')
+        for key in ('sequence', 'timestamp_us', 'gyro_age_ms', 'quat_age_ms', 'status',
+                    'read_index', 'host_read_start_us', 'transaction_us'):
+            if type(raw.get(key)) is not int or raw[key] < 0:
+                raise ValueError('imu_full_raw missing or invalid ' + key)
+        return
     raw = native.get('imu_raw') or {}
     block = raw.get('block')
     if native.get('imu_source') != 'bus' or not isinstance(block, list) or len(block) != 12:

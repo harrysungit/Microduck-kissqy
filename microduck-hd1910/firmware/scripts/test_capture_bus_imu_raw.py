@@ -19,6 +19,22 @@ class Fragmented(io.BytesIO):
 
 
 class CaptureTests(unittest.TestCase):
+    def test_full_q4_capture_requires_actual_full_bytes_and_descriptor(self):
+        raw = dict(mode='full_q4_v1', descriptor=[0x51,0x34,1,1,200,28,120,0],
+                   block=[0]*28, sequence=3, timestamp_us=24_000,
+                   gyro_age_ms=2, quat_age_ms=3, status=0,
+                   read_index=4, host_read_start_us=30_000, transaction_us=5000)
+        native = dict(imu_source='bus', imu_full_raw=raw)
+        capture.validate_bus({'native': native})
+        for key in ('block', 'descriptor', 'sequence', 'timestamp_us', 'read_index',
+                    'host_read_start_us', 'transaction_us', 'gyro_age_ms', 'quat_age_ms'):
+            changed = dict(raw)
+            del changed[key]
+            with self.assertRaises(ValueError, msg=key):
+                capture.validate_bus({'native': dict(native, imu_full_raw=changed)})
+        with self.assertRaises(ValueError):
+            capture.validate_bus({'native': dict(native, imu_raw={'block':[0]*12})})
+
     @unittest.skipUnless(sys.platform == 'linux', 'robot uses Linux Unix sockets')
     def test_bounded_capture_uses_only_read_routes_and_keeps_exact_records(self):
         with tempfile.TemporaryDirectory() as directory:

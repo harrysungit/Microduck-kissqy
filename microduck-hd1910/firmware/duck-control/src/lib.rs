@@ -13,6 +13,7 @@ pub mod bus;
 pub mod fall;
 pub mod feetech;
 pub mod feetech_snapshot;
+pub mod full_q4;
 pub mod gyro_fusion;
 pub mod hardware;
 pub mod imu;

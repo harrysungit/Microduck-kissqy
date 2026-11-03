@@ -188,6 +188,7 @@ fn independent_imu_startup_case(
             &port,
             "feetech",
             "legacy",
+            "legacy",
             &state,
             Duration::from_millis(20),
             &path,
@@ -390,7 +391,7 @@ async fn commissioning_startup_missing_imu_preserves_servo_presence_and_frozen_r
     state.commissioning.store(true, Ordering::Relaxed);
     let worker_state = state.clone();
     let worker = tokio::spawn(async move {
-        run(&port, "feetech", "legacy", &worker_state, Duration::from_millis(20), &calibration_path, None).await;
+        run(&port, "feetech", "legacy", "legacy", &worker_state, Duration::from_millis(20), &calibration_path, None).await;
     });
     tokio::time::timeout(Duration::from_secs(3), async {
         while state.startup_bus_failures.load(Ordering::Relaxed) == 0 {
@@ -682,6 +683,7 @@ fn commissioning_flow(dxl2: bool, qinmo: bool) {
                 &port,
                 "auto",
                 if qinmo { "qinmo" } else { "legacy" },
+                "legacy",
                 &control_state,
                 Duration::from_millis(20),
                 &path,

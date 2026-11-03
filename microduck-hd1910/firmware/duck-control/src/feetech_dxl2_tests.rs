@@ -189,6 +189,8 @@ fn peer_fault(
         imu_identity: None,
             observations: observations::Observations::default(),
             last_imu_response_at: None,
+        full_q4: false,
+        full_q4_verified: false,
     };
     (
         bus,

@@ -568,6 +568,7 @@ pub(crate) mod tests {
                     transaction_us: 4_700,
                     read_index: cycle,
                 }),
+                imu_full_raw: None,
                 imu_reader: None,
                 command_clamps_total: 1,
                 partial_samples_total: 2,
@@ -794,6 +795,65 @@ pub(crate) mod tests {
         assert_eq!(report["native"]["joints"][0]["name"], proto::JOINT_NAMES[0]);
         assert_eq!(report["native"]["joints"][0]["missing_total"], u64::MAX);
         task.abort();
+    }
+
+    #[test]
+    fn full_q4_raw_stream_retains_actual_c_fixture_and_metadata() {
+        // Simulated serializer fixture, not a physical capture or state/pose parity claim.
+        let fixture_json: Value = serde_json::from_str(include_str!(
+            "../../duck-control/tests/fixtures/fullquat-wire-fixtures.json"
+        ))
+        .unwrap();
+        let hex = fixture_json["samples"][0]["fullblock_hex"]
+            .as_str()
+            .unwrap();
+        let block: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        let full = duck_control::full_q4::Sample::decode(&block).unwrap();
+        let mut snapshot = fixture(42);
+        let bus = snapshot.bus.as_mut().unwrap();
+        bus.native.dynamic.imu_raw = None;
+        bus.native.dynamic.imu_full_raw = Some(feetech_snapshot::BusImuFullRawSample::new(
+            full, 123456, 5000, 42,
+        ));
+        let report = bus.report();
+        let raw = &report["native"]["imu_full_raw"];
+        assert!(report["native"].get("imu_raw").is_none());
+        assert_eq!(raw["block"], json!(block));
+        assert_eq!(raw["descriptor"], json!(duck_control::full_q4::DESCRIPTOR));
+        assert_eq!(raw["sequence"], 4294967294u64);
+        assert_eq!(raw["timestamp_us"], 4294958592u64);
+        assert_eq!(raw["host_read_start_us"], 123456u64);
+        assert_eq!(raw["transaction_us"], 5000u64);
+        assert_eq!(raw["read_index"], 42u64);
+        let record = raw_codec::record(
+            2,
+            &Dynamic {
+                state: snapshot.state.as_deref(),
+                bus: Some(bus.dynamic()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            u32::from_le_bytes(record[..4].try_into().unwrap()) as usize,
+            record.len() - 4
+        );
+        if let Ok(path) = std::env::var("FULL_Q4_RAW_FIXTURE_PATH") {
+            let mut metadata = bus.metadata();
+            metadata["native"]["imu_bus"] = json!({"protocol":"feetech","board":"imu_to_dxl","identity":[1,1,0,68,77],"quaternion":"full_q4_v1","descriptor":duck_control::full_q4::DESCRIPTOR});
+            let mut wire =
+                raw_codec::json_record(&json!({"schema":SCHEMA,"channels":{"bus":metadata}}))
+                    .unwrap();
+            wire.extend(record);
+            std::fs::write(&path, wire).unwrap();
+            std::fs::write(
+                format!("{path}.json"),
+                serde_json::to_vec(&json!({"bus":report})).unwrap(),
+            )
+            .unwrap();
+        }
     }
 
     #[tokio::test]

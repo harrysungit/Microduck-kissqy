@@ -1862,6 +1862,8 @@ pub struct Bus {
     pub imu_protocol: ImuBusProtocol,
     /// Data units/layout are an installation choice, never inferred from a compatible ID.
     pub imu_profile: ImuBusProfile,
+    /// Explicit MD-board wire format; requires matching capability descriptor.
+    pub imu_quaternion: ImuQuaternion,
     pub feetech_calibration: Option<PathBuf>,
     /// Serial port the servos and the IMU board share. The Radxa Zero 3W wires them to
     /// `/dev/ttyS2`.
@@ -1919,6 +1921,22 @@ impl ImuBusProfile {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImuQuaternion {
+    #[default]
+    Legacy,
+    FullQ4V1,
+}
+impl ImuQuaternion {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::FullQ4V1 => "full_q4_v1",
+        }
+    }
+}
+
 #[cfg(test)]
 mod imu_bus_protocol_tests {
     use super::*;
@@ -1947,6 +1965,26 @@ mod imu_bus_protocol_tests {
             assert!(params.validate(Path::new("test.toml")).is_err());
         }
         assert!(toml::from_str::<Params>("[bus]\nimu_profile='guess'\n").is_err());
+    }
+
+    #[test]
+    fn full_q4_config_is_explicit_and_rejects_incompatible_sources() {
+        let base = "[bus]\nprotocol='feetech'\nimu_quaternion='full_q4_v1'\n";
+        let params: Params = toml::from_str(base).expect("full Q4 is a startup option");
+        assert!(params.validate(Path::new("test.toml")).is_ok());
+        for text in [
+            base.replace("protocol='feetech'", "protocol='dynamixel'"),
+            format!("{base}imu_protocol='dxl2'\n"),
+            format!("{base}[trunk_imu]\nsource='bno08x'\n"),
+            format!("{base}[trunk_imu]\nsource='lsm6dsv16x'\n"),
+        ] {
+            let params: Params = toml::from_str(&text).unwrap();
+            assert!(params.validate(Path::new("test.toml")).is_err(), "{text}");
+        }
+        let default = serde_json::to_value(Bus::default()).unwrap();
+        assert_eq!(default["imu_quaternion"], "legacy");
+        assert!(toml::from_str::<Params>(&base.replace("full_q4_v1", "full_q4_v2")).is_err());
+        assert!(registry::entry_for("bus.imu_quaternion").is_some());
     }
 
     #[test]
@@ -2032,6 +2070,7 @@ impl Default for Bus {
             protocol: BusProtocol::Dynamixel,
             imu_protocol: ImuBusProtocol::Auto,
             imu_profile: ImuBusProfile::Legacy,
+            imu_quaternion: ImuQuaternion::Legacy,
             feetech_calibration: None,
             port: "/dev/ttyS2".into(),
             fast_sync_read: true,
@@ -2347,6 +2386,16 @@ impl Params {
             return Err(ParamsError::TrunkImu {
                 path: path.display().to_string(),
                 reason,
+            });
+        }
+        if self.bus.imu_quaternion == ImuQuaternion::FullQ4V1
+            && (self.bus.protocol != BusProtocol::Feetech
+                || self.bus.imu_protocol == ImuBusProtocol::Dxl2
+                || self.trunk_imu.source != TrunkImuSource::Bus)
+        {
+            return Err(ParamsError::TrunkImu {
+                path: path.display().to_string(),
+                reason: "bus.imu_quaternion='full_q4_v1' requires native Feetech servos, a Feetech MD bus IMU, and trunk_imu.source='bus'".into(),
             });
         }
         // Gated on `enabled` because robotd loads this file too: a board not using netpad must

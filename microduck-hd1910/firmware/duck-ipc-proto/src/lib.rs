@@ -443,6 +443,9 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// startup refuses motion. Install matching control.47 and Studio for this display.
 /// Optional native.imu_raw adds original bus bytes to bus/raw telemetry; collecting
 /// bytes requires a robotd build with this field. Version skew remains serveable.
+/// API 42 adds optional native.imu_full_raw and bus.imu_quaternion. Full captures
+/// require this robotd and matching full-Q4 MCU firmware; legacy stays the default.
+/// Install matching clients for schema discovery; version skew is logged and served.
 pub const API_VERSION: u32 = 42;
 
 /// The observation width every policy this robot family runs is built against.

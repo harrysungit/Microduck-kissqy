@@ -1380,6 +1380,7 @@ fn spawn_control_thread(
                     &params.bus.port,
                     params.bus.imu_protocol.label(),
                     params.bus.imu_profile.label(),
+                    params.bus.imu_quaternion.label(),
                     &state,
                     period,
                     calibration_path,
@@ -1392,6 +1393,7 @@ fn spawn_control_thread(
                     &params.bus.port,
                     params.bus.imu_protocol.label(),
                     params.bus.imu_profile.label(),
+                    params.bus.imu_quaternion.label(),
                     &state,
                     period,
                     host,
@@ -1579,6 +1581,7 @@ fn open_bus(
                         let mut raw = duck_control::feetech::Bus::open(port)?;
                         raw.set_imu_protocol(bus.imu_protocol.label())?;
                         raw.set_imu_profile(bus.imu_profile.label())?;
+                        raw.set_imu_quaternion(bus.imu_quaternion.label())?;
                         let mut io = duck_control::feetech::FeetechIo::for_startup(
                             raw,
                             calibration.clone(),
@@ -1597,6 +1600,7 @@ fn open_bus(
             let mut raw = duck_control::feetech::Bus::open(port)?;
             raw.set_imu_protocol(bus.imu_protocol.label())?;
             raw.set_imu_profile(bus.imu_profile.label())?;
+            raw.set_imu_quaternion(bus.imu_quaternion.label())?;
             let mut io = match host_imu {
                 Some(reader) => duck_control::feetech::FeetechIo::for_startup_with_imu(
                     raw,
@@ -7190,6 +7194,7 @@ mod tests {
                         imu_age_upper_bound_ms: None,
                         imu_status: None,
                         imu_raw: None,
+                        imu_full_raw: None,
                         imu_reader: None,
                         command_clamps_total: 0,
                         partial_samples_total: 0,

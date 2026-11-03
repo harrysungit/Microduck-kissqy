@@ -104,6 +104,8 @@ impl Bus {
                         (
                             BusImuBoard::Dxl2,
                             identity,
+                quaternion: "legacy",
+                descriptor: None,
                             self.dxl2_read(124, 12, deadline),
                         )
                     }
@@ -113,6 +115,8 @@ impl Bus {
                 (
                     BusImuBoard::Dxl2,
                     identity,
+                quaternion: "legacy",
+                descriptor: None,
                     self.dxl2_read(124, 12, deadline),
                 )
             };
@@ -122,6 +126,8 @@ impl Bus {
                 protocol: board.protocol().label(),
                 board: board.label(),
                 identity,
+                quaternion: "legacy",
+                descriptor: None,
                 profile: self.imu_profile.label(),
                 gyro_dps_per_lsb: self.imu_profile.gyro_dps_per_lsb(),
                 identification: match board {

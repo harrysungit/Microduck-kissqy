@@ -129,6 +129,8 @@ pub struct Dynamic {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub imu_raw: Option<BusImuRawSample>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub imu_full_raw: Option<BusImuFullRawSample>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub imu_reader: Option<crate::trunk_imu::HostImuHealth>,
     pub command_clamps_total: u64,
     pub partial_samples_total: u64,
@@ -155,6 +157,47 @@ pub struct BusImuRawSample {
     pub transaction_us: u64,
     /// Telemetry attempt number that accepted these bytes. Unchanged after read loss.
     pub read_index: u64,
+}
+
+/// Actual full-Q4 bytes, accepted by the same cycle as the joints and orientation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct BusImuFullRawSample {
+    pub mode: &'static str,
+    pub descriptor: [u8; 8],
+    pub block: [u8; 28],
+    pub sequence: u32,
+    /// MCU ENDOP capture time, wrapping microseconds; not sensor/chip time.
+    pub timestamp_us: u32,
+    pub gyro_age_ms: u16,
+    pub quat_age_ms: u16,
+    pub status: u8,
+    /// Host monotonic time since this FeetechIo opened.
+    pub host_read_start_us: u64,
+    /// Entire telemetry cycle, including both IMU READ and servo Sync Read.
+    pub transaction_us: u64,
+    pub read_index: u64,
+}
+impl BusImuFullRawSample {
+    pub fn new(
+        full: crate::full_q4::Sample,
+        host_read_start_us: u64,
+        transaction_us: u64,
+        read_index: u64,
+    ) -> Self {
+        Self {
+            mode: "full_q4_v1",
+            descriptor: crate::full_q4::DESCRIPTOR,
+            block: full.block,
+            sequence: full.sequence,
+            timestamp_us: full.timestamp_us,
+            gyro_age_ms: full.gyro_age_ms,
+            quat_age_ms: full.quat_age_ms,
+            status: full.status,
+            host_read_start_us,
+            transaction_us,
+            read_index,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

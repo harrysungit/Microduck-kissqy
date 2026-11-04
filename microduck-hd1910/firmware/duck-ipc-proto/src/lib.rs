@@ -446,7 +446,11 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// API 42 adds optional native.imu_full_raw and bus.imu_quaternion. Full captures
 /// require this robotd and matching full-Q4 MCU firmware; legacy stays the default.
 /// Install matching clients for schema discovery; version skew is logged and served.
-pub const API_VERSION: u32 = 42;
+/// API 43 requires independent upright/nose-down verification for bus IMUs too.
+/// Install the matching robotd/Studio pair: calibration-status advertises
+/// imu_verification_contract and successful verify-imu includes imu_check proof.
+/// Old clients must not infer verification from operator confirmation alone.
+pub const API_VERSION: u32 = 43;
 
 /// The observation width every policy this robot family runs is built against.
 ///

@@ -903,7 +903,11 @@ board's left where every existing file has it. An uncommissioned BNO08x starts f
 mapping microduck-replica's policy trial ran on a robot); an LSM6DSV16X breakout has no standard
 way up and starts from identity. Motion needs the *wired* source's mount verified
 (`Calibration::validate_motion_for`). `bus verify-imu --confirmed [--mount-wxyz w,x,y,z]` writes
-the wired source's slot. For a module it is two checks, because upright alone proves only the
+the wired source's slot. API 43 applies two measured checks to every source, including the
+ID 200 bus board; operator confirmation alone never saves it. Install the matching robotd
+and Studio pair: `calibration-status` advertises
+`imu_verification_contract: "upright_nose_down_v1"`, and success includes `imu_check` proof.
+Upright alone proves only the
 vertical axis: a mount a quarter or half turn off about the vertical reads upright just as well,
 and then turns a pitch into a roll or flips its sign — the policy corrects the wrong way and the
 robot falls. First the robot standing upright must read within 5° of upright under the mount
@@ -913,7 +917,10 @@ reads here stays in every later reading as a tilt bias; the reply echoes it as
 The tip is measured from that upright reading, not from vertical, so the bias neither swings its
 direction nor counts toward it: it must be at least 12°, and gravity's change must point toward
 +x (in the trunk frame gravity moves toward the low side) within 20° of straight ahead. Five
-readings running that read forward write the slot; five running that read tail-down or sideways
+independent accepted readings running that read forward write the slot; repeated sample
+counters and failed reads do not count. Both legacy bus and signed full-Q4 readings are checked
+in sensor axes under the candidate mount, without applying the current mount twice. No
+calibration or bus protocol binding is changed until this check succeeds. Five running that read tail-down or sideways
 refuse it with the angle they read; a reading that disagrees with the run before it starts the
 count again, so a wobble through forward is never taken for the tip. `busStatus` carries
 `imu_verification` while the command waits. Relax, or the requester giving up, cancels the wait

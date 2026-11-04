@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::oneshot;
 
-pub const BUILD: &str = "82aec98-fullq4-candidate.3";
+pub const BUILD: &str = "replica-imu-verify-control.48";
 const MAX_PENDING: usize = 16;
 const POSITION_TOLERANCE: u16 = 8;
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(4);
@@ -70,7 +70,7 @@ pub enum BusCommand {
     CalibrationStatus,
     /// Record that the official IMU mounting axes have been physically checked — for the
     /// trunk IMU this robotd reads (`[trunk_imu] source`), in that source's own slot. For the
-    /// bus board that check is the operator's word. For a module, start with the robot upright
+    /// bus board and a module alike, start with the robot upright
     /// (within 5° under the mount being confirmed), then tip it nose-down by 15–30° within 20 s;
     /// the command answers once it has seen the tip.
     VerifyImu {
@@ -115,11 +115,17 @@ fn command_timeout(command: &BusCommand) -> Duration {
         }
         BusCommand::VerifyImu { .. } => NOSE_DOWN_WINDOW + Duration::from_secs(10),
         BusCommand::HoldHome { duration_ms, .. } => {
-            Duration::from_millis((*duration_ms).min(60_000)) + HOLD_SETTLE + Duration::from_secs(10)
+            Duration::from_millis((*duration_ms).min(60_000))
+                + HOLD_SETTLE
+                + Duration::from_secs(10)
         }
         _ => Duration::from_secs(15),
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "feetech_commissioning_bus_verify_tests.rs"]
+mod bus_verification_tests;
 
 struct Job {
     command: BusCommand,
@@ -320,12 +326,16 @@ fn save_calibration(path: &Path, calibration: &Calibration) -> Result<(), String
     }
     let encoded = toml::to_string_pretty(calibration).map_err(|e| e.to_string())?;
     if let Ok(previous) = std::fs::read(path) {
-        if previous == encoded.as_bytes() { return Ok(()); }
+        if previous == encoded.as_bytes() {
+            return Ok(());
+        }
         let backup = path.with_extension("previous.toml");
-        let temporary = backup.with_extension(format!("toml.tmp.{}",std::process::id()));
+        let temporary = backup.with_extension(format!("toml.tmp.{}", std::process::id()));
         std::fs::write(&temporary, &previous).map_err(|e| e.to_string())?;
-        std::fs::File::open(&temporary).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
-        std::fs::rename(&temporary,&backup).map_err(|e| e.to_string())?;
+        std::fs::File::open(&temporary)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())?;
+        std::fs::rename(&temporary, &backup).map_err(|e| e.to_string())?;
     }
     for target in [path.to_path_buf(), path.with_extension("saved.toml")] {
         let temporary: PathBuf = target.with_extension(format!("toml.tmp.{}", std::process::id()));
@@ -370,6 +380,7 @@ pub(crate) fn calibration_status(
         .collect::<Vec<_>>();
     let mut status = json!({"calibration_path":path, "calibration":calibration,
         "uncalibrated_joints":missing, "imu_source": source.label(),
+        "imu_verification_contract":"upright_nose_down_v1",
         "motion_validation":calibration.validate_motion_for(source).err().map(|e| e.to_string()),
         "note":"Capture uses a manually known joint angle; encoder center is not joint zero."});
     let mount = calibration.imu_mount(source);
@@ -540,7 +551,10 @@ pub struct HoldStatus {
 
 /// HOME in raw counts for each joint, from its saved zero and `directions` (or its saved
 /// direction). Refuses anything a joint's saved limits or the single-turn encoder cannot hold.
-fn home_targets(calibration: &Calibration, directions: &[i8]) -> Result<(Vec<i32>, Vec<i8>), String> {
+fn home_targets(
+    calibration: &Calibration,
+    directions: &[i8],
+) -> Result<(Vec<i32>, Vec<i8>), String> {
     let joints = &calibration.joints;
     if !directions.is_empty()
         && (directions.len() != joints.len() || directions.iter().any(|d| ![-1, 1].contains(d)))
@@ -559,12 +573,18 @@ fn home_targets(calibration: &Calibration, directions: &[i8]) -> Result<(Vec<i32
         if let (Some(min), Some(max)) = (joint.min_rad, joint.max_rad)
             && !(min..=max).contains(&angle)
         {
-            return Err(format!("{}: HOME is outside its saved physical limits", joint.name));
+            return Err(format!(
+                "{}: HOME is outside its saved physical limits",
+                joint.name
+            ));
         }
         let raw = f64::from(joint.zero_raw)
             + f64::from(direction) * angle * 4096.0 / std::f64::consts::TAU;
         if !(0.0..=4095.0).contains(&raw) {
-            return Err(format!("{}: HOME falls outside the single-turn encoder", joint.name));
+            return Err(format!(
+                "{}: HOME falls outside the single-turn encoder",
+                joint.name
+            ));
         }
         targets.push(raw.round() as i32);
         used.push(direction);
@@ -582,7 +602,10 @@ fn hold_error(samples: &BTreeMap<u8, ServoSample>, ids: &[u8], targets: &[i32]) 
 
 /// Forget the hold, telling its requester why if it is still waiting. Torque is the caller's.
 fn cancel_hold(hold: &mut Option<Hold>, reason: &str) {
-    if let Some(Hold { reply: Some(reply), .. }) = hold.take() {
+    if let Some(Hold {
+        reply: Some(reply), ..
+    }) = hold.take()
+    {
         let _ = reply.send(Err(format!("hold-home stopped: {reason}")));
     }
 }
@@ -611,7 +634,10 @@ fn step_hold(
                     .iter()
                     .map(|id| (*id, samples[id].feedback.position_signed_raw))
                     .collect::<Vec<_>>();
-                h.from = ids.iter().map(|id| samples[id].feedback.position_raw).collect();
+                h.from = ids
+                    .iter()
+                    .map(|id| samples[id].feedback.position_raw)
+                    .collect();
                 bus.signed_positions(&rows).map_err(|e| e.to_string())?;
                 h.stage = HoldStage::Enable;
             }
@@ -633,7 +659,11 @@ fn step_hold(
                     })
                     .collect::<Vec<_>>();
                 if h.last_written.as_ref() != Some(&goals) {
-                    let rows = ids.iter().copied().zip(goals.iter().copied()).collect::<Vec<_>>();
+                    let rows = ids
+                        .iter()
+                        .copied()
+                        .zip(goals.iter().copied())
+                        .collect::<Vec<_>>();
                     bus.signed_positions(&rows).map_err(|e| e.to_string())?;
                     h.last_written = Some(goals);
                 }
@@ -703,12 +733,22 @@ fn center_partition(ids: &[u8], samples: &BTreeMap<u8, ServoSample>) -> (Vec<u8>
 }
 
 /// Which trunk IMU this commissioning run reads, and its newest accepted reading in the
-/// sensor's own axes — what `verify-imu` checks a candidate mount against. No reading for the
-/// bus board, whose verification is the operator's word as it always was.
+/// sensor's own axes — what `verify-imu` checks a candidate mount against, including ID 200.
 #[derive(Clone, Copy)]
 struct ImuContext {
     source: TrunkImuKind,
     reading: Option<SensorReading>,
+    sequence: Option<u32>,
+}
+
+/// A fresh frame's default is not a measured orientation. In particular legacy FT6
+/// readiness flags can accompany undecodable quaternion bytes; never certify that default.
+fn valid_verification_reading(mount: [f64; 4], reading: SensorReading) -> bool {
+    let unit = |q: [f64; 4]| {
+        q.iter().all(|v| v.is_finite())
+            && (0.98..=1.02).contains(&q.iter().map(|v| v * v).sum::<f64>())
+    };
+    unit(mount) && reading.quat.is_some_and(unit) && reading.gyro.iter().all(|v| v.is_finite())
 }
 
 /// The reading under `mount`, settled: three pushes through a fresh frame, so the median sees
@@ -747,6 +787,11 @@ fn upright_check(
             source.label()
         )
     })?;
+    if !valid_verification_reading(mount, reading) {
+        return Err(
+            "verify-imu needs a valid measured quaternion and finite gyro; nothing saved".into(),
+        );
+    }
     let trunk = under_mount(mount, reading);
     let tilt = super::home_start::tilt_deg(trunk.gravity);
     let echo = json!({"imu_source": source.label(), "mount_wxyz": mount,
@@ -845,6 +890,7 @@ struct PendingVerify {
     /// Readings running that read nose-down, and that read the wrong way.
     forward: u32,
     wrong: u32,
+    last_sequence: Option<u32>,
 }
 
 impl PendingVerify {
@@ -856,7 +902,29 @@ impl PendingVerify {
             deadline: now + NOSE_DOWN_WINDOW,
             forward: 0,
             wrong: 0,
+            last_sequence: None,
         }
+    }
+
+    /// Count independent accepted sensor samples, never repeated reads of the same sample.
+    /// Legacy boards without counters still supply one sample per successful transaction.
+    fn observe_new(
+        &mut self,
+        reading: Option<SensorReading>,
+        sequence: Option<u32>,
+        now: Instant,
+    ) -> Option<Result<Value, String>> {
+        let reading = if reading.is_some() && sequence.is_some() {
+            if sequence == self.last_sequence {
+                None
+            } else {
+                self.last_sequence = sequence;
+                reading
+            }
+        } else {
+            reading
+        };
+        self.observe(reading, now)
     }
 
     /// One tick's live reading — none on a tick whose read failed. `Some` once decided.
@@ -865,7 +933,20 @@ impl PendingVerify {
         reading: Option<SensorReading>,
         now: Instant,
     ) -> Option<Result<Value, String>> {
+        if now >= self.deadline {
+            return Some(Err(format!(
+                "no nose-down tip of at least {NOSE_DOWN_MIN_DEG}° held within {} s of the \
+                 upright check; nothing saved",
+                NOSE_DOWN_WINDOW.as_secs()
+            )));
+        }
         if let Some(reading) = reading {
+            if !valid_verification_reading(self.mount, reading) {
+                return Some(Err(
+                    "verify-imu lost a valid measured quaternion or finite gyro; nothing saved"
+                        .into(),
+                ));
+            }
             match nose_down(self.mount, reading, self.upright.gravity) {
                 NoseDown::Level => (self.forward, self.wrong) = (0, 0),
                 NoseDown::Forward(echo) => {
@@ -883,13 +964,7 @@ impl PendingVerify {
                 }
             }
         }
-        (now >= self.deadline).then(|| {
-            Err(format!(
-                "no nose-down tip of at least {NOSE_DOWN_MIN_DEG}° held within {} s of the \
-                 upright check; nothing saved",
-                NOSE_DOWN_WINDOW.as_secs()
-            ))
-        })
+        None
     }
 }
 
@@ -981,13 +1056,13 @@ fn process_job(
     if let Some(h) = hold.as_ref()
         && !matches!(job.command, BusCommand::VerifyImu { .. })
     {
-        let _ = job.reply.send(if matches!(job.command, BusCommand::HoldHome { .. })
-            && h.stage == HoldStage::Holding
-        {
-            Ok(json!({"holding":true,"torque":"on","already":true,"directions":h.directions}))
-        } else {
-            Err("the robot is holding HOME; relax first".into())
-        });
+        let _ = job.reply.send(
+            if matches!(job.command, BusCommand::HoldHome { .. }) && h.stage == HoldStage::Holding {
+                Ok(json!({"holding":true,"torque":"on","already":true,"directions":h.directions}))
+            } else {
+                Err("the robot is holding HOME; relax first".into())
+            },
+        );
         return;
     }
     match job.command {
@@ -1112,34 +1187,20 @@ fn process_job(
                         }
                     }
                 };
-                if imu.source == TrunkImuKind::Bus {
-                    let mut candidate = calibration.clone();
-                    candidate.imu_bus_protocol = Some(bus.imu_board().protocol());
-                    candidate.imu_bus_profile = Some(bus.imu_profile());
-                    save_verified(&candidate, path, imu.source, mount, None).map(
-                        |(updated, _status)| {
-                            *calibration = updated;
-                            calibration_status_for_bus(calibration, path, imu.source, bus)
-                        },
-                    )
-                } else {
-                    match upright_check(imu.source, mount, imu.reading) {
-                        Ok(upright) => {
-                            tracing::warn!(
-                                source = imu.source.label(),
-                                "verify-imu: upright check passed; now tip the robot nose-down \
+                match upright_check(imu.source, mount, imu.reading) {
+                    Ok(upright) => {
+                        tracing::warn!(
+                            source = imu.source.label(),
+                            "verify-imu: upright check passed; now tip the robot nose-down \
                                  by 15-30 degrees"
-                            );
-                            *verifying = Some(PendingVerify::new(
-                                job.reply,
-                                mount,
-                                upright,
-                                Instant::now(),
-                            ));
-                            return;
-                        }
-                        Err(error) => Err(error),
+                        );
+                        let mut pending =
+                            PendingVerify::new(job.reply, mount, upright, Instant::now());
+                        pending.last_sequence = imu.sequence;
+                        *verifying = Some(pending);
+                        return;
                     }
+                    Err(error) => Err(error),
                 }
             } else {
                 Err(
@@ -1154,7 +1215,9 @@ fn process_job(
             duration_ms,
         } => {
             if !(500..=60_000).contains(&duration_ms) {
-                let _ = job.reply.send(Err("hold-home duration-ms must be 500..60000".into()));
+                let _ = job
+                    .reply
+                    .send(Err("hold-home duration-ms must be 500..60000".into()));
                 return;
             }
             match home_targets(calibration, &directions) {
@@ -1510,7 +1573,8 @@ pub async fn run(
     let mut imu_frame = TrunkFrame::new(calibration.imu_mount(source).quat);
     let mut imu_gate = HostImuGate::default();
     let mut imu_epoch = None;
-    let mut host_reading = None;
+    let mut raw_reading = None;
+    let mut raw_sequence = None;
     let mut verifying: Option<PendingVerify> = None;
     let mut last_sample = None;
     let mut last_failure = None;
@@ -1564,7 +1628,8 @@ pub async fn run(
                     gyro: sample.gyro,
                     quat: Some(sample.chip_quat()),
                 };
-                host_reading = Some(reading);
+                raw_reading = Some(reading);
+                raw_sequence = Some(sample.sequence);
                 let decoded = imu_frame.push(reading);
                 let valid = imu_frame.ready();
                 state.imu_ready.store(valid, Ordering::Relaxed);
@@ -1603,6 +1668,8 @@ pub async fn run(
                 .imu_stale_run
                 .store(bus_freshness.stale.run, Ordering::Relaxed);
             checked.map_err(|e| e.to_string())?;
+            raw_reading = Some(imu.reading());
+            raw_sequence = imu.sequence;
             let decoded = imu_decoder.push(imu.reading());
             let valid = imu_decoder.ready();
             state.imu_ready.store(valid, Ordering::Relaxed);
@@ -1647,9 +1714,10 @@ pub async fn run(
             if motion.is_some() {
                 off_pending = abort_motion(&mut bus, &ids, &mut motion, error);
             }
-            if hold.as_ref().is_some_and(|h| {
-                h.stage != HoldStage::Holding || consecutive >= HOLD_READ_FAILURES
-            }) {
+            if hold
+                .as_ref()
+                .is_some_and(|h| h.stage != HoldStage::Holding || consecutive >= HOLD_READ_FAILURES)
+            {
                 cancel_hold(&mut hold, error);
                 off_pending = torque_off(&mut bus, &ids).err();
             }
@@ -1670,6 +1738,7 @@ pub async fn run(
                         ImuContext {
                             source,
                             reading: None,
+                            sequence: None,
                         },
                         &mut verifying,
                         &mut hold,
@@ -1751,7 +1820,8 @@ pub async fn run(
                     &mut off_pending,
                     ImuContext {
                         source,
-                        reading: host_reading,
+                        reading: raw_reading,
+                        sequence: raw_sequence,
                     },
                     &mut verifying,
                     &mut hold,
@@ -1775,8 +1845,8 @@ pub async fn run(
             step_hold(&mut bus, &samples, &ids, &mut hold, &mut off_pending);
         }
         if let Some(mut pending) = verifying.take() {
-            let reading = if error.is_none() { host_reading } else { None };
-            match pending.observe(reading, Instant::now()) {
+            let reading = if error.is_none() { raw_reading } else { None };
+            match pending.observe_new(reading, raw_sequence, Instant::now()) {
                 // The requester stopped waiting (its RPC timed out): a mount saved now would be
                 // verified with nobody told.
                 _ if pending.reply.is_closed() => {
@@ -1787,8 +1857,13 @@ pub async fn run(
                     let old_mount = calibration.imu_mount(source).quat;
                     let result = verdict
                         .and_then(|check| {
+                            let mut candidate = calibration.clone();
+                            if source == TrunkImuKind::Bus {
+                                candidate.imu_bus_protocol = Some(bus.imu_board().protocol());
+                                candidate.imu_bus_profile = Some(bus.imu_profile());
+                            }
                             save_verified(
-                                &calibration,
+                                &candidate,
                                 calibration_path,
                                 source,
                                 pending.mount,
@@ -1809,6 +1884,7 @@ pub async fn run(
                                 &bus,
                             ))));
                         if old_mount != calibration.imu_mount(source).quat {
+                            imu_decoder = TrunkFrame::new(calibration.imu_mount_quat);
                             imu_frame = TrunkFrame::new(calibration.imu_mount(source).quat);
                         }
                     }
@@ -1827,9 +1903,15 @@ pub async fn run(
         if error.is_none() && total_success == 1 {
             state.startup_step(2, "success", "标定采集第一份有效反馈已读取");
         } else if total_success == 0 {
-            state.startup_step(2, "waiting", error.as_deref().unwrap_or("等待第一份有效反馈"));
+            state.startup_step(
+                2,
+                "waiting",
+                error.as_deref().unwrap_or("等待第一份有效反馈"),
+            );
         }
-        if cycle == 1 { state.startup_step(4, "success", "标定采集首个周期完成；运动策略关闭"); }
+        if cycle == 1 {
+            state.startup_step(4, "success", "标定采集首个周期完成；运动策略关闭");
+        }
         state.last_tick_us.store(
             state.started.elapsed().as_micros() as u64,
             Ordering::Relaxed,
@@ -1913,7 +1995,11 @@ pub async fn run(
                     completed_ids: m.completed.clone(),
                 }),
                 hold: hold.as_ref().map(|h| HoldStatus {
-                    stage: if h.stage == HoldStage::Holding { "holding" } else { "ramping" },
+                    stage: if h.stage == HoldStage::Holding {
+                        "holding"
+                    } else {
+                        "ramping"
+                    },
                     max_error_deg: f64::from(h.max_error) * 360.0 / 4096.0,
                     directions: h.directions.clone(),
                 }),
@@ -2531,26 +2617,40 @@ mod tests {
     #[test]
     fn hold_home_refuses_bad_directions_and_limits() {
         let mut calibration = Calibration::commissioning(JOINT_IDS);
-        assert!(home_targets(&calibration, &[1, -1]).unwrap_err().contains("exactly"));
+        assert!(
+            home_targets(&calibration, &[1, -1])
+                .unwrap_err()
+                .contains("exactly")
+        );
         let mut zero = vec![1i8; NUM_JOINTS];
         zero[3] = 0;
         assert!(home_targets(&calibration, &zero).is_err());
         // left_hip_pitch HOME is about -26°: a saved range that excludes it refuses.
         calibration.joints[2].min_rad = Some(0.0);
         calibration.joints[2].max_rad = Some(1.0);
-        assert!(home_targets(&calibration, &[]).unwrap_err().contains("limits"));
+        assert!(
+            home_targets(&calibration, &[])
+                .unwrap_err()
+                .contains("limits")
+        );
     }
 
     #[test]
     fn hold_home_parses_with_and_without_its_options() {
         let bare: BusCommand = serde_json::from_value(json!({"action":"hold-home"})).unwrap();
-        assert!(matches!(bare, BusCommand::HoldHome { ref directions, duration_ms: 3000 } if directions.is_empty()));
+        assert!(
+            matches!(bare, BusCommand::HoldHome { ref directions, duration_ms: 3000 } if directions.is_empty())
+        );
         let full: BusCommand = serde_json::from_value(
             json!({"action":"hold-home","directions":[1,-1,1,1,1,1,1,1,1,1,1,1,1,1,1],"duration_ms":2500}),
         )
         .unwrap();
-        assert!(matches!(full, BusCommand::HoldHome { ref directions, duration_ms: 2500 } if directions[1] == -1));
-        assert!(serde_json::from_value::<BusCommand>(json!({"action":"hold-home","speed":1})).is_err());
+        assert!(
+            matches!(full, BusCommand::HoldHome { ref directions, duration_ms: 2500 } if directions[1] == -1)
+        );
+        assert!(
+            serde_json::from_value::<BusCommand>(json!({"action":"hold-home","speed":1})).is_err()
+        );
     }
 
     /// A verified mount lands in that module's slot; the bus board's mount is not touched, and
@@ -2608,10 +2708,9 @@ mod tests {
         assert_eq!(bus["imu_mount"]["verified"], false, "{bus}");
     }
 
-    /// The bus board keeps its old rule: the operator's confirmation, no reading required, the
-    /// mount in the top-level keys where every existing file has it.
+    /// Saving a bus mount keeps its existing top-level keys, without adding a module slot.
     #[test]
-    fn verify_imu_for_the_bus_board_is_unchanged() {
+    fn saving_the_bus_mount_keeps_its_existing_slot() {
         let path = temp_calibration("verify-bus");
         let calibration = Calibration::commissioning(JOINT_IDS);
         let mount = [0.0, 1.0, 0.0, 0.0];

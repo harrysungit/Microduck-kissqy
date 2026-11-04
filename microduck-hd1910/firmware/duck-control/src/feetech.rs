@@ -343,7 +343,10 @@ impl Bus {
             "full_q4_v1" => true,
             _ => return Err(error("IMU quaternion must be legacy or full_q4_v1")),
         };
-        if full && self.imu_protocol == BusImuProtocol::Dxl2 {
+        if full
+            && (self.imu_protocol == BusImuProtocol::Dxl2
+                || self.imu_profile == BusImuProfile::Qinmo)
+        {
             return Err(error("full_q4_v1 requires the MD Feetech bus IMU"));
         }
         self.full_q4 = full;
@@ -467,6 +470,9 @@ impl Bus {
         };
         if profile == BusImuProfile::Qinmo && self.imu_protocol == BusImuProtocol::Dxl2 {
             return Err(error("Qinmo profile requires imu_protocol=auto or feetech"));
+        }
+        if profile == BusImuProfile::Qinmo && self.full_q4 {
+            return Err(error("full_q4_v1 requires the legacy MD profile"));
         }
         self.imu_profile = profile;
         self.imu_identity = None;

@@ -838,6 +838,7 @@ mod tests {
                 &path,
                 "auto",
                 "legacy",
+                "legacy",
                 &worker_state,
                 Duration::from_millis(5),
                 Some(&host),

@@ -74,7 +74,18 @@ impl Bus {
                         .min(Duration::from_millis(20)),
                 )
             };
-            let (board, identity, raw) = if self.imu_profile == BusImuProfile::Qinmo {
+            let mut descriptor = None;
+            let (board, identity, raw) = if self.full_q4 {
+                let identity = read(self, 0, 5)?;
+                if BusImuBoard::from_identity(&identity) != Some(BusImuBoard::ImuToDxl) {
+                    return Err(error(
+                        "full_q4_v1 requires the own MD model and little-endian identity",
+                    ));
+                }
+                crate::full_q4::descriptor(&read(self, 186, 8)?)?;
+                descriptor = Some(crate::full_q4::DESCRIPTOR);
+                (BusImuBoard::ImuToDxl, identity, read(self, 200, 28))
+            } else if self.imu_profile == BusImuProfile::Qinmo {
                 self.exchange_budget(
                     IMU_ID,
                     1,
@@ -104,8 +115,6 @@ impl Bus {
                         (
                             BusImuBoard::Dxl2,
                             identity,
-                quaternion: "legacy",
-                descriptor: None,
                             self.dxl2_read(124, 12, deadline),
                         )
                     }
@@ -115,8 +124,6 @@ impl Bus {
                 (
                     BusImuBoard::Dxl2,
                     identity,
-                quaternion: "legacy",
-                descriptor: None,
                     self.dxl2_read(124, 12, deadline),
                 )
             };
@@ -126,8 +133,8 @@ impl Bus {
                 protocol: board.protocol().label(),
                 board: board.label(),
                 identity,
-                quaternion: "legacy",
-                descriptor: None,
+                quaternion: if self.full_q4 { "full_q4_v1" } else { "legacy" },
+                descriptor,
                 profile: self.imu_profile.label(),
                 gyro_dps_per_lsb: self.imu_profile.gyro_dps_per_lsb(),
                 identification: match board {
@@ -141,10 +148,14 @@ impl Bus {
             }
             let raw = raw?;
             observation.sample_valid = Some(false);
-            let sample = match board {
-                BusImuBoard::Qinmo => ImuSample::decode_qinmo(&raw),
-                BusImuBoard::Dxl2 => ImuSample::decode_dxl2(&raw),
-                _ => ImuSample::decode(&raw),
+            let sample = if self.full_q4 {
+                ImuSample::decode_full(&raw)
+            } else {
+                match board {
+                    BusImuBoard::Qinmo => ImuSample::decode_qinmo(&raw),
+                    BusImuBoard::Dxl2 => ImuSample::decode_dxl2(&raw),
+                    _ => ImuSample::decode(&raw),
+                }
             }?;
             observation.info = Some(info);
             observation.sample_valid = Some(sample.reading().quat.is_some());

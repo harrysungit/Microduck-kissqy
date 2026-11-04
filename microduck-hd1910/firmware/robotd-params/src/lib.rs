@@ -1975,6 +1975,7 @@ mod imu_bus_protocol_tests {
         for text in [
             base.replace("protocol='feetech'", "protocol='dynamixel'"),
             format!("{base}imu_protocol='dxl2'\n"),
+            format!("{base}imu_profile='qinmo'\n"),
             format!("{base}[trunk_imu]\nsource='bno08x'\n"),
             format!("{base}[trunk_imu]\nsource='lsm6dsv16x'\n"),
         ] {
@@ -2391,11 +2392,12 @@ impl Params {
         if self.bus.imu_quaternion == ImuQuaternion::FullQ4V1
             && (self.bus.protocol != BusProtocol::Feetech
                 || self.bus.imu_protocol == ImuBusProtocol::Dxl2
+                || self.bus.imu_profile != ImuBusProfile::Legacy
                 || self.trunk_imu.source != TrunkImuSource::Bus)
         {
             return Err(ParamsError::TrunkImu {
                 path: path.display().to_string(),
-                reason: "bus.imu_quaternion='full_q4_v1' requires native Feetech servos, a Feetech MD bus IMU, and trunk_imu.source='bus'".into(),
+                reason: "bus.imu_quaternion='full_q4_v1' requires native Feetech servos, a legacy-profile Feetech MD bus IMU, and trunk_imu.source='bus'".into(),
             });
         }
         // Gated on `enabled` because robotd loads this file too: a board not using netpad must

@@ -483,6 +483,8 @@ fn commissioning_flow(dxl2: bool, qinmo: bool) {
     let corrupt = Arc::new(AtomicBool::new(false));
     let goals = Arc::new(AtomicU64::new(0));
     let exits = Arc::new(AtomicBool::new(false));
+    let tipped = Arc::new(AtomicBool::new(false));
+    let device_tipped = tipped.clone();
     let (device_started, device_corrupt, device_goals, device_exits) = (
         started.clone(),
         corrupt.clone(),
@@ -549,7 +551,13 @@ fn commissioning_flow(dxl2: bool, qinmo: bool) {
                         (124, 12) => {
                             let mut data = vec![0; 12];
                             data[0] = rounds;
-                            data[7] = 0x30;
+                            // q(20° pitch) * the candidate x-axis mounting rotation.
+                            let xyz: [u16; 3] = if device_tipped.load(Ordering::Relaxed) {
+                                [0x2fe1, 0x3183, 0xa58f]
+                            } else { [0x3000, 0, 0] };
+                            for (axis, raw) in xyz.into_iter().enumerate() {
+                                data[6 + axis * 2..8 + axis * 2].copy_from_slice(&raw.to_le_bytes());
+                            }
                             data
                         }
                         _ => panic!("unexpected DXL2 read"),
@@ -639,6 +647,9 @@ fn commissioning_flow(dxl2: bool, qinmo: bool) {
                         } else {
                             if qinmo {
                                 data[..2].copy_from_slice(&1640i16.to_le_bytes());
+                                if device_tipped.load(Ordering::Relaxed) {
+                                    data[8..10].copy_from_slice(&0x318fu16.to_le_bytes());
+                                }
                             } else {
                                 data[7] = 0x30;
                             }
@@ -740,14 +751,25 @@ fn commissioning_flow(dxl2: bool, qinmo: bool) {
         } else {
             assert!(report["last_sample"]["imu"].get("sequence").is_none());
         }
-        let reply = tokio::runtime::Runtime::new().unwrap().block_on(dispatch(
-            &state,
-            proto::Id::Number(80),
-            serde_json::json!({"action":"verify-imu","confirmed":true,
-                "mount_wxyz":if qinmo {vec![1.0,0.0,0.0,0.0]} else {vec![(1.0_f64-0.125_f64.powi(2)).sqrt(),0.125,0.0,0.0]} }),
-        ));
-        let reply = serde_json::to_value(reply).unwrap();
+        let verifying_state = state.clone();
+        let verify = std::thread::spawn(move || {
+            tokio::runtime::Runtime::new().unwrap().block_on(dispatch(
+                &verifying_state,
+                proto::Id::Number(80),
+                serde_json::json!({"action":"verify-imu","confirmed":true,
+                    "mount_wxyz":if qinmo {vec![1.0,0.0,0.0,0.0]} else {vec![(1.0_f64-0.125_f64.powi(2)).sqrt(),0.125,0.0,0.0]} }),
+            ))
+        });
+        wait(&|| state.bus_snapshot.load_full().is_some_and(|s| {
+            serde_json::to_value(s.as_ref()).unwrap()["imu_verification"].is_string()
+        }));
+        assert_eq!(std::fs::read_to_string(&calibration_path).unwrap(), original,
+            "neither protocol/profile binding can change before a measured tip");
+        tipped.store(true, Ordering::Relaxed);
+        let reply = serde_json::to_value(verify.join().unwrap()).unwrap();
         assert!(reply.get("result").is_some(), "{reply}");
+        assert!(reply["result"]["imu_check"]["nose_down"].is_object(), "{reply}");
+        tipped.store(false, Ordering::Relaxed);
         original = std::fs::read_to_string(&calibration_path).unwrap();
         let saved: duck_control::feetech::Calibration = toml::from_str(&original).unwrap();
         assert_eq!(

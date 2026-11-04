@@ -736,13 +736,15 @@ is 41 with the independent startup observations below; version skew itself is ne
 a matching runtime binary. [Selection and verification guide](../robot/qinmo-imu.md).
 
 **Optional full quaternion candidate.** `[bus] imu_quaternion = "legacy"` remains the
-default. To enable the offline full-Q4 candidate, install the matching robotd API 42 build
+default. The integrated release is `replica-imu-verify-control.48`, API 43. To enable
+the offline full-Q4 candidate, install this runtime
 and MD MCU firmware with its full-Q4 feature enabled, then use:
 
 ```toml
 [bus]
 protocol = "feetech"
 imu_protocol = "feetech" # "auto" also allows the MD Feetech identity
+imu_profile = "legacy" # Qinmo has its own incompatible layout
 imu_quaternion = "full_q4_v1"
 [trunk_imu]
 source = "bus"
@@ -752,7 +754,7 @@ Merge these keys into the existing startup file, preserving its UART, calibratio
 settings, then explicitly restart robotd. Normal, read-only and commissioning modes all
 honor the setting. Startup requires the own MD model `44 4d` with endian byte zero and the
 exact descriptor `51 34 01 01 c8 1c 78 00` at 186/8. Missing/unknown descriptors, FT6,
-DXL2 and host I²C combinations refuse this mode. An invalid full sample never falls back
+DXL2, Qinmo and host I²C combinations refuse this mode. An invalid full sample never falls back
 to the legacy reconstruction. Set `imu_quaternion = "legacy"` (or remove the key) and
 restart to disable it; the enabled MCU retains the legacy block. Before installing an
 older robotd, remove this new key. API skew continues to be logged and served; older
@@ -833,6 +835,8 @@ original calibration refusal; this path writes nothing. Missing/malformed config
 an invalid calibration structure or an unavailable UART leaves the observation unknown.
 An I2C-selected source never probes the bus IMU. Legacy uses only its configured transport
 (auto may try Feetech then DXL2); explicit Qinmo uses PING and 56/15 and never probes DXL2.
+Explicit full-Q4 checks its own MD identity, exact descriptor and 200/28 sample under
+the same diagnostic budget, without establishing the control identity cache.
 
 `robot.busStatus.native.imu_observation` contains `source: "bus"`, `attempted`, `responding`,
 `age_ms`, nullable `info` (the complete `BusImuInfo`), `sample_valid`, `sensor_ready`,
@@ -920,7 +924,7 @@ direction nor counts toward it: it must be at least 12°, and gravity's change m
 independent accepted readings running that read forward write the slot; repeated sample
 counters and failed reads do not count. Both legacy bus and signed full-Q4 readings are checked
 in sensor axes under the candidate mount, without applying the current mount twice. No
-calibration or bus protocol binding is changed until this check succeeds. Five running that read tail-down or sideways
+calibration or bus protocol/profile binding is changed until this check succeeds. Five running that read tail-down or sideways
 refuse it with the angle they read; a reading that disagrees with the run before it starts the
 count again, so a wobble through forward is never taken for the tip. `busStatus` carries
 `imu_verification` while the command waits. Relax, or the requester giving up, cancels the wait

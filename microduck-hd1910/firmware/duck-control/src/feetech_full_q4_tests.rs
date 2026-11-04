@@ -146,6 +146,35 @@ fn full_mode_requires_own_identity_and_exact_descriptor_never_falls_back() {
     assert!(bus.set_imu_quaternion("full_q4_v1").is_err());
     assert!(bus.set_imu_quaternion("guess").is_err());
 }
+
+#[test]
+fn full_mode_and_qinmo_profile_are_refused_in_both_selection_orders() {
+    // These independent installation options must not combine into a wrong UART layout.
+    let (mut bus, _peer) = peer(IMU_IDENTITY, [0; 8], 0);
+    bus.set_imu_profile("qinmo").unwrap();
+    assert!(bus.set_imu_quaternion("full_q4_v1").is_err());
+    let (mut bus, _peer) = peer(IMU_IDENTITY, [0; 8], 0);
+    bus.set_imu_quaternion("full_q4_v1").unwrap();
+    assert!(bus.set_imu_profile("qinmo").is_err());
+}
+
+#[test]
+fn full_mode_startup_observation_respects_descriptor_without_control_identity() {
+    let (mut bus, device) = peer([1, 1, 0, 0x44, 0x4d], crate::full_q4::DESCRIPTOR, 0);
+    bus.set_imu_quaternion("full_q4_v1").unwrap();
+    let observation = bus.observe_startup_imu();
+    assert!(observation.responding);
+    assert_eq!(observation.sample_valid, Some(true));
+    let info = observation.info.unwrap();
+    assert_eq!(info.quaternion, "full_q4_v1");
+    assert_eq!(info.descriptor, Some(crate::full_q4::DESCRIPTOR));
+    assert!(bus.imu_info().is_none(), "diagnostics cannot establish control identity");
+    assert!(!bus.full_q4_verified);
+    let tx = device.requests.lock().unwrap();
+    assert_eq!(tx.len(), 3);
+    assert_eq!(tx[1], packet(IMU_ID, READ, &[186, 8]).unwrap());
+    assert_eq!(tx[2], packet(IMU_ID, READ, &[200, 28]).unwrap());
+}
 #[test]
 fn full_mode_reads_actual_block_then_servo_only_sync_in_single_owner() {
     let (mut bus, peer) = full_peer(0);

@@ -9,6 +9,7 @@
       "age_ms": 0,
       "info": {
         "protocol": "feetech",
+        "quaternion": "legacy",
         "board": "ft6",
         "identity": [6, 0, 0, 0, 242],
         "profile": "legacy",

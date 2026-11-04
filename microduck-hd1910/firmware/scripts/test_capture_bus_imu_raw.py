@@ -18,12 +18,19 @@ class Fragmented(io.BytesIO):
         return super().read(min(size, 2))
 
 
+def full_raw():
+    block = bytearray(28)
+    struct.pack_into('<4H', block, 6, 0xbc00, 0, 0, 0)
+    struct.pack_into('<IIHHBB', block, 14, 3, 24_000, 2, 3, 0, 1)
+    return dict(mode='full_q4_v1', descriptor=[0x51,0x34,1,1,200,28,120,0],
+                block=list(block), sequence=3, timestamp_us=24_000,
+                gyro_age_ms=2, quat_age_ms=3, status=0,
+                read_index=4, host_read_start_us=30_000, transaction_us=5000)
+
+
 class CaptureTests(unittest.TestCase):
     def test_full_q4_capture_requires_actual_full_bytes_and_descriptor(self):
-        raw = dict(mode='full_q4_v1', descriptor=[0x51,0x34,1,1,200,28,120,0],
-                   block=[0]*28, sequence=3, timestamp_us=24_000,
-                   gyro_age_ms=2, quat_age_ms=3, status=0,
-                   read_index=4, host_read_start_us=30_000, transaction_us=5000)
+        raw = full_raw()
         native = dict(imu_source='bus', imu_full_raw=raw)
         capture.validate_bus({'native': native})
         for key in ('block', 'descriptor', 'sequence', 'timestamp_us', 'read_index',
@@ -34,6 +41,30 @@ class CaptureTests(unittest.TestCase):
                 capture.validate_bus({'native': dict(native, imu_full_raw=changed)})
         with self.assertRaises(ValueError):
             capture.validate_bus({'native': dict(native, imu_raw={'block':[0]*12})})
+
+    def test_full_q4_capture_rejects_every_wire_metadata_mismatch(self):
+        fields = [('sequence', 14, 32), ('timestamp_us', 18, 32),
+                  ('gyro_age_ms', 22, 16), ('quat_age_ms', 24, 16), ('status', 26, 8)]
+        for key, offset, bits in fields:
+            for value in (full_raw()[key] + 1, 1 << bits):
+                with self.subTest(field=key, metadata=value):
+                    raw = full_raw()
+                    raw[key] = value
+                    with self.assertRaises(ValueError):
+                        capture.validate_bus({'native': dict(imu_source='bus', imu_full_raw=raw)})
+            with self.subTest(field=key, changed_wire_byte=True):
+                raw = full_raw()
+                raw['block'][offset] ^= 1
+                with self.assertRaises(ValueError):
+                    capture.validate_bus({'native': dict(imu_source='bus', imu_full_raw=raw)})
+
+    def test_full_q4_capture_rejects_unknown_wire_format(self):
+        for version in (0, 2, 255):
+            with self.subTest(version=version):
+                raw = full_raw()
+                raw['block'][27] = version
+                with self.assertRaises(ValueError):
+                    capture.validate_bus({'native': dict(imu_source='bus', imu_full_raw=raw)})
 
     @unittest.skipUnless(sys.platform == 'linux', 'robot uses Linux Unix sockets')
     def test_bounded_capture_uses_only_read_routes_and_keeps_exact_records(self):

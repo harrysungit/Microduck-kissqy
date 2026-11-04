@@ -61,12 +61,8 @@ impl Freshness {
         if self.reset_required {
             return Err(invalid("counter/time continuity lost; reopen explicitly"));
         }
-        let age_us = u64::from(sample.gyro_age_ms.max(sample.quat_age_ms)) * 1000;
-        let current_age = age_us.saturating_add(transaction_us);
-        if sample.status != 0 || current_age > 50_000 {
-            return Err(invalid("not ready or older than 50 ms"));
-        }
-        if let Some((last, accepted_at, accepted_age)) = &self.last {
+        // Readiness failure must not hide a decoded board restart.
+        if let Some((last, _, _)) = &self.last {
             let sequence_delta = sample.sequence.wrapping_sub(last.sequence);
             let time_delta = sample.timestamp_us.wrapping_sub(last.timestamp_us);
             if sequence_delta == 0 {
@@ -74,6 +70,21 @@ impl Freshness {
                     self.reset_required = true;
                     return Err(invalid("quaternion/time changed without a new sequence"));
                 }
+            } else if sequence_delta >= 0x8000_0000 || time_delta == 0 || time_delta >= 0x8000_0000
+            {
+                self.reset_required = true;
+                return Err(invalid(
+                    "counter/time moved backwards or board restarted; reopen explicitly",
+                ));
+            }
+        }
+        let age_us = u64::from(sample.gyro_age_ms.max(sample.quat_age_ms)) * 1000;
+        let current_age = age_us.saturating_add(transaction_us);
+        if sample.status != 0 || current_age > 50_000 {
+            return Err(invalid("not ready or older than 50 ms"));
+        }
+        if let Some((last, accepted_at, accepted_age)) = &self.last {
+            if sample.sequence == last.sequence {
                 let elapsed = now
                     .saturating_duration_since(*accepted_at)
                     .as_micros()
@@ -82,12 +93,6 @@ impl Freshness {
                     return Err(invalid("repeated sequence older than 50 ms"));
                 }
                 return Ok(());
-            }
-            if sequence_delta >= 0x8000_0000 || time_delta == 0 || time_delta >= 0x8000_0000 {
-                self.reset_required = true;
-                return Err(invalid(
-                    "counter/time moved backwards or board restarted; reopen explicitly",
-                ));
             }
         }
         self.last = Some((*sample, now, current_age));
@@ -287,6 +292,93 @@ mod tests {
         Freshness::default()
             .check(&caught_up, 1000, now + Duration::from_secs(2))
             .unwrap();
+    }
+
+    #[test]
+    fn invalid_status_regression_still_latches_restart() {
+        let now = Instant::now();
+        let mut gate = Freshness::default();
+        gate.check(
+            &Sample::decode(&bytes([0xbc00, 0, 0, 0], 100, 1_000_000)).unwrap(),
+            1000,
+            now,
+        )
+        .unwrap();
+        let mut raw = bytes([0xbc00, 0, 0, 0], 1, 8333);
+        raw[26] = 1;
+        let reboot = Sample::decode(&raw).unwrap();
+        assert!(
+            gate.check(&reboot, 1000, now + Duration::from_millis(20))
+                .is_err()
+        );
+        let caught_up = Sample::decode(&bytes([0xbc00, 0, 0, 0], 130, 1_083_290)).unwrap();
+        assert!(
+            gate.check(&caught_up, 1000, now + Duration::from_secs(2))
+                .is_err(),
+            "invalid status must not hide a decoded counter/time regression"
+        );
+        Freshness::default()
+            .check(&caught_up, 1000, now + Duration::from_secs(2))
+            .unwrap();
+    }
+
+    #[test]
+    fn stale_regression_still_latches_restart() {
+        let now = Instant::now();
+        let mut gate = Freshness::default();
+        gate.check(
+            &Sample::decode(&bytes([0xbc00, 0, 0, 0], 100, 1_000_000)).unwrap(),
+            1000,
+            now,
+        )
+        .unwrap();
+        let mut raw = bytes([0xbc00, 0, 0, 0], 101, 8333);
+        raw[24..26].copy_from_slice(&51u16.to_le_bytes());
+        let reboot = Sample::decode(&raw).unwrap();
+        assert!(
+            gate.check(&reboot, 1000, now + Duration::from_millis(20))
+                .is_err()
+        );
+        let caught_up = Sample::decode(&bytes([0xbc00, 0, 0, 0], 130, 1_083_290)).unwrap();
+        assert!(
+            gate.check(&caught_up, 1000, now + Duration::from_secs(2))
+                .is_err(),
+            "stale age must not hide a decoded timestamp regression"
+        );
+        Freshness::default()
+            .check(&caught_up, 1000, now + Duration::from_secs(2))
+            .unwrap();
+    }
+
+    #[test]
+    fn invalid_freshness_at_normal_wrap_does_not_latch_restart() {
+        let now = Instant::now();
+        for (status, age) in [(1, 0), (0, 51)] {
+            let mut gate = Freshness::default();
+            gate.check(
+                &Sample::decode(&bytes([0xbc00, 0, 0, 0], u32::MAX, u32::MAX - 1667)).unwrap(),
+                1000,
+                now,
+            )
+            .unwrap();
+            let mut raw = bytes([0xbc00, 0, 0, 0], 0, 6666);
+            raw[26] = status;
+            raw[22..24].copy_from_slice(&u16::to_le_bytes(age));
+            assert!(
+                gate.check(
+                    &Sample::decode(&raw).unwrap(),
+                    1000,
+                    now + Duration::from_millis(8)
+                )
+                .is_err()
+            );
+            gate.check(
+                &Sample::decode(&bytes([0xbc00, 0, 0, 0], 1, 14999)).unwrap(),
+                1000,
+                now + Duration::from_millis(16),
+            )
+            .unwrap();
+        }
     }
 
     #[test]

@@ -53,6 +53,12 @@ def validate_bus(bus):
                     'read_index', 'host_read_start_us', 'transaction_us'):
             if type(raw.get(key)) is not int or raw[key] < 0:
                 raise ValueError('imu_full_raw missing or invalid ' + key)
+        if block[27] != 1:
+            raise ValueError('unknown imu_full_raw block format')
+        wire = struct.unpack_from('<IIHHB', bytes(block), 14)
+        for key, value in zip(('sequence', 'timestamp_us', 'gyro_age_ms', 'quat_age_ms', 'status'), wire):
+            if raw[key] != value:
+                raise ValueError('imu_full_raw wire metadata mismatch: ' + key)
         return
     raw = native.get('imu_raw') or {}
     block = raw.get('block')

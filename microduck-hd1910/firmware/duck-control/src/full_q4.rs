@@ -52,6 +52,9 @@ pub fn descriptor(raw: &[u8]) -> Result<()> {
 }
 #[derive(Default)]
 pub struct Freshness {
+    /// Decoded observations establish continuity even when readiness rejects them.
+    observed: Option<Sample>,
+    /// Rejected or repeated observations must not refresh the accepted sample's age.
     last: Option<(Sample, Instant, u64)>,
     /// A detected restart cannot heal itself by counting past the old values.
     reset_required: bool,
@@ -62,7 +65,7 @@ impl Freshness {
             return Err(invalid("counter/time continuity lost; reopen explicitly"));
         }
         // Readiness failure must not hide a decoded board restart.
-        if let Some((last, _, _)) = &self.last {
+        if let Some(last) = &self.observed {
             let sequence_delta = sample.sequence.wrapping_sub(last.sequence);
             let time_delta = sample.timestamp_us.wrapping_sub(last.timestamp_us);
             if sequence_delta == 0 {
@@ -78,6 +81,7 @@ impl Freshness {
                 ));
             }
         }
+        self.observed = Some(*sample);
         let age_us = u64::from(sample.gyro_age_ms.max(sample.quat_age_ms)) * 1000;
         let current_age = age_us.saturating_add(transaction_us);
         if sample.status != 0 || current_age > 50_000 {
@@ -376,6 +380,150 @@ mod tests {
                 &Sample::decode(&bytes([0xbc00, 0, 0, 0], 1, 14999)).unwrap(),
                 1000,
                 now + Duration::from_millis(16),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn rejected_observation_forward_then_backward_latches_restart() {
+        let now = Instant::now();
+        for (status, age) in [(1, 0), (0, 51)] {
+            let mut gate = Freshness::default();
+            gate.check(
+                &Sample::decode(&bytes([0xbc00, 0, 0, 0], 100, 1_000_000)).unwrap(),
+                1000,
+                now,
+            )
+            .unwrap();
+            let mut raw = bytes([0xbc00, 0, 0, 0], 200, 1_833_300);
+            raw[26] = status;
+            raw[24..26].copy_from_slice(&u16::to_le_bytes(age));
+            assert!(
+                gate.check(
+                    &Sample::decode(&raw).unwrap(),
+                    1000,
+                    now + Duration::from_millis(20)
+                )
+                .is_err()
+            );
+            let backwards = Sample::decode(&bytes([0xbc00, 0, 0, 0], 150, 1_416_650)).unwrap();
+            assert!(
+                gate.check(&backwards, 1000, now + Duration::from_millis(40))
+                    .is_err(),
+                "readiness-invalid forward observations must establish continuity"
+            );
+            let caught_up = Sample::decode(&bytes([0xbc00, 0, 0, 0], 300, 2_666_600)).unwrap();
+            assert!(
+                gate.check(&caught_up, 1000, now + Duration::from_millis(60))
+                    .is_err()
+            );
+            Freshness::default()
+                .check(&caught_up, 1000, now + Duration::from_millis(60))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn first_rejected_observation_establishes_continuity() {
+        let now = Instant::now();
+        for (status, age) in [(1, 0), (0, 51)] {
+            let mut gate = Freshness::default();
+            let mut raw = bytes([0xbc00, 0, 0, 0], 200, 1_833_300);
+            raw[26] = status;
+            raw[22..24].copy_from_slice(&u16::to_le_bytes(age));
+            assert!(
+                gate.check(&Sample::decode(&raw).unwrap(), 1000, now)
+                    .is_err()
+            );
+            let backwards = Sample::decode(&bytes([0xbc00, 0, 0, 0], 150, 1_416_650)).unwrap();
+            assert!(
+                gate.check(&backwards, 1000, now + Duration::from_millis(20))
+                    .is_err(),
+                "the first decoded observation must establish continuity before readiness"
+            );
+            let caught_up = Sample::decode(&bytes([0xbc00, 0, 0, 0], 201, 1_841_633)).unwrap();
+            assert!(
+                gate.check(&caught_up, 1000, now + Duration::from_millis(40))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_observation_keeps_same_sequence_quaternion_and_time_immutable() {
+        let now = Instant::now();
+        for (q, stamp) in [
+            ([0x3c00, 0, 0, 0], 1_833_300),
+            ([0xbc00, 0, 0, 0], 1_841_633),
+        ] {
+            let mut gate = Freshness::default();
+            let mut raw = bytes([0xbc00, 0, 0, 0], 200, 1_833_300);
+            raw[26] = 1;
+            assert!(
+                gate.check(&Sample::decode(&raw).unwrap(), 1000, now)
+                    .is_err()
+            );
+            let changed = Sample::decode(&bytes(q, 200, stamp)).unwrap();
+            assert!(
+                gate.check(&changed, 1000, now + Duration::from_millis(20))
+                    .is_err(),
+                "a rejected observation still binds quaternion/time to its sequence"
+            );
+            let next = Sample::decode(&bytes([0xbc00, 0, 0, 0], 201, 1_849_966)).unwrap();
+            assert!(
+                gate.check(&next, 1000, now + Duration::from_millis(40))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_observation_does_not_refresh_accepted_repeat_age() {
+        let now = Instant::now();
+        let mut gate = Freshness::default();
+        let raw = bytes([0xbc00, 0, 0, 0], 100, 1_000_000);
+        let accepted = Sample::decode(&raw).unwrap();
+        gate.check(&accepted, 1000, now).unwrap();
+        let mut rejected = raw;
+        rejected[26] = 1;
+        assert!(
+            gate.check(
+                &Sample::decode(&rejected).unwrap(),
+                1000,
+                now + Duration::from_millis(40)
+            )
+            .is_err()
+        );
+        assert!(
+            gate.check(&accepted, 1000, now + Duration::from_millis(50))
+                .is_err(),
+            "rejected observations must not make accepted duplicates younger"
+        );
+        gate.check(
+            &Sample::decode(&bytes([0xbc00, 0, 0, 0], 101, 1_008_333)).unwrap(),
+            1000,
+            now + Duration::from_millis(60),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn first_rejected_observation_allows_forward_recovery_without_reopen() {
+        let now = Instant::now();
+        for (status, age) in [(1, 0), (0, 51)] {
+            let mut gate = Freshness::default();
+            let mut raw = bytes([0xbc00, 0, 0, 0], 200, 1_833_300);
+            raw[26] = status;
+            raw[22..24].copy_from_slice(&u16::to_le_bytes(age));
+            assert!(
+                gate.check(&Sample::decode(&raw).unwrap(), 1000, now)
+                    .is_err()
+            );
+            gate.check(
+                &Sample::decode(&bytes([0xbc00, 0, 0, 0], 201, 1_841_633)).unwrap(),
+                1000,
+                now + Duration::from_millis(20),
             )
             .unwrap();
         }

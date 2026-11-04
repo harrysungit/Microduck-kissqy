@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::oneshot;
 
-pub const BUILD: &str = "82aec98-fullq4-candidate.2";
+pub const BUILD: &str = "82aec98-fullq4-candidate.3";
 const MAX_PENDING: usize = 16;
 const POSITION_TOLERANCE: u16 = 8;
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(4);

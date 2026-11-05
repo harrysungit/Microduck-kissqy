@@ -22,6 +22,7 @@
 mod chorale;
 mod communication_stats;
 mod control;
+mod fall_action;
 mod feetech_commissioning;
 mod feetech_read_only;
 mod home_start;
@@ -2321,6 +2322,12 @@ async fn control_loop<T: RobotIo>(
     let limp_fall_max = Duration::from_millis(params.safety.limp_fall_max_ms);
     let limp_fall_pose = Duration::from_millis(params.safety.limp_fall_pose_ms);
     let mut limp_fall = LimpFall::Idle;
+    // `[safety] fall_action`: what to do once the robot is down while a policy drives it.
+    let mut fall_guard = fall_action::FallGuard::new(
+        params.safety.fall_action,
+        Duration::from_millis(params.safety.fall_retry_ms),
+        Duration::from_millis(params.safety.fall_upright_ms),
+    );
 
     // The voice, and the ear. Both optional equipment: a robot without a codec or a bank
     // walks identically — the player degrades to a debug line, and the mic worker is only
@@ -3177,6 +3184,28 @@ async fn control_loop<T: RobotIo>(
             }
         }
         state.home_recovery.store(home_recovery, Ordering::Relaxed);
+
+        // Fall action (`[safety] fall_action`, default `policy` = upstream: nothing). Once the
+        // fall verdict has latched while a policy drives the robot, `relax` cuts torque at once
+        // and `relax_after_retry` first gives the policy `fall_retry_ms` to get up. The cut is an
+        // ordinary `robot.relax`, taken at the top of the next tick like the console's, so the
+        // loop stays the one motor writer. Skills (roulade, ground pick, the LB get-up), sits,
+        // the shutdown sit and a limp-fall sequence are deliberate and never interrupted.
+        let fall_eligible = was_driving
+            && limp_fall == LimpFall::Idle
+            && shutdown_sit.is_none()
+            && !powered_off
+            && controller
+                .as_ref()
+                .is_some_and(|c| !c.busy() && !c.is_sitting());
+        if fall_guard.observe(tick_start, safety.fallen(), fall_eligible) {
+            tracing::warn!(
+                action = ?params.safety.fall_action,
+                retry_ms = params.safety.fall_retry_ms,
+                "down while a policy drives the robot — relaxing ([safety] fall_action)"
+            );
+            intents.request_relax();
+        }
 
         // Limp-fall (`[safety] limp_fall`): catch the fall on the way down.
         //

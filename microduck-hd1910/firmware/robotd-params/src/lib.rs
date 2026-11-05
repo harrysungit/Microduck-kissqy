@@ -1706,6 +1706,21 @@ impl PolicyParams {
     }
 }
 
+/// What robotd does once the robot is down — the fall verdict has latched — while a policy
+/// drives it. See `robotd/src/fall_action.rs`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FallAction {
+    /// Upstream: nothing. The policy keeps driving and is trusted to get the robot up.
+    #[default]
+    Policy,
+    /// Torque off at once, as `robot.relax` does; the robot stays limp until someone stands it
+    /// up and enables it again.
+    Relax,
+    /// Let the policy try to get up for `fall_retry_ms`, then relax as above.
+    RelaxAfterRetry,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SafetyParams {
@@ -1762,6 +1777,19 @@ pub struct SafetyParams {
     /// Gain for that ramp. The joints have to actually travel across the floor, so it is
     /// not the limp gain; it is the softened standing gain rather than the walking one.
     pub limp_fall_pose_gain: u16,
+    /// What to do once the robot is down while a policy drives it. `policy` (the default) is
+    /// upstream's answer: nothing, the policy gets the robot up. `relax` cuts torque as soon as
+    /// the fall verdict latches and leaves the robot limp until someone enables it again — for
+    /// a robot whose policy cannot get up and only thrashes. `relax_after_retry` gives the
+    /// policy `fall_retry_ms` first. Skills, sits, the shutdown sit and a limp-fall sequence are
+    /// never interrupted.
+    pub fall_action: FallAction,
+    /// With `relax_after_retry`: how long the policy may try to get up. 4 s — upstream's
+    /// velstand v8 gets up within 3.2 s at p90 after a push fall.
+    pub fall_retry_ms: u64,
+    /// How long the robot must read upright before a retry clock resets, so a policy that
+    /// nearly makes it and drops back cannot keep trying forever.
+    pub fall_upright_ms: u64,
 }
 
 impl Default for PolicyParams {
@@ -1812,6 +1840,9 @@ impl Default for SafetyParams {
             limp_fall_max_ms: 1500,
             limp_fall_pose_ms: 600,
             limp_fall_pose_gain: 160,
+            fall_action: FallAction::Policy,
+            fall_retry_ms: 4000,
+            fall_upright_ms: 1000,
         }
     }
 }
@@ -4002,5 +4033,24 @@ mod r17_profile_checks {
                 .to_string_lossy()
                 .contains("1c94934c6421ec72ed48079cea749668")
         );
+    }
+}
+
+#[cfg(test)]
+mod fall_action_tests {
+    use super::*;
+
+    #[test]
+    fn fall_action_defaults_to_upstream_and_parses_both_modes() {
+        let p = SafetyParams::default();
+        assert_eq!(p.fall_action, FallAction::Policy);
+        assert_eq!((p.fall_retry_ms, p.fall_upright_ms), (4000, 1000));
+        let p: Params = toml::from_str("[safety]\nfall_action = \"relax\"\n").unwrap();
+        assert_eq!(p.safety.fall_action, FallAction::Relax);
+        let text = "[safety]\nfall_action = \"relax_after_retry\"\nfall_retry_ms = 2500\n";
+        let p: Params = toml::from_str(text).unwrap();
+        assert_eq!(p.safety.fall_action, FallAction::RelaxAfterRetry);
+        assert_eq!(p.safety.fall_retry_ms, 2500);
+        assert!(toml::from_str::<Params>("[safety]\nfall_action = \"limp\"\n").is_err());
     }
 }

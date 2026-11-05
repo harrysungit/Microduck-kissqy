@@ -715,6 +715,132 @@ async fn enabled_joint_model_keeps_driving_falls_despite_non_home_readback() {
     );
 }
 
+/// The joint-model rig above, enabled, driving and upright, with `[safety] fall_action` set.
+async fn driving_joint_model(
+    action: params::FallAction,
+    retry_ms: u64,
+) -> (
+    Arc<RobotState>,
+    Arc<Intents>,
+    Arc<Mutex<Trace>>,
+    Arc<Mutex<Sensors>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let mut params: Params =
+        toml::from_str(include_str!("../../packaging/robotd-profile.toml")).unwrap();
+    params.policy.walk =
+        Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("test-data/joint-audit/policy.onnx"));
+    params.policy.sitstand = Some("none".into());
+    params.policy.ground_pick = Some("none".into());
+    params.policy.roulade = Some("none".into());
+    params.policy.skills.clear();
+    params.policy.voltage_adapt = false;
+    params.audio.enabled = false;
+    params.audio.greet = false;
+    params.safety.fall_action = action;
+    params.safety.fall_retry_ms = retry_ms;
+    params.safety.fall_upright_ms = 200;
+    let state = Arc::new(RobotState::new(
+        &params,
+        Path::new("/tmp/fall-action-unused.toml"),
+        false,
+        false,
+    ));
+    let intents = Arc::new(Intents::new());
+    let trace = Arc::new(Mutex::new(Trace::default()));
+    let current = Arc::new(Mutex::new(Sensors {
+        positions: duck_control::deployment::home(),
+        ..Default::default()
+    }));
+    let io = FallingIo {
+        inner: RecoveryIo {
+            sensors: *current.lock().unwrap(),
+            dropping: Arc::new(AtomicBool::new(false)),
+            fail_write: Arc::new(AtomicBool::new(false)),
+            trace: trace.clone(),
+            missing: 0,
+        },
+        current: current.clone(),
+    };
+    let task = tokio::spawn(control_loop(
+        io,
+        state.clone(),
+        intents.clone(),
+        params,
+        PathBuf::from("/tmp/fall-action-unused.toml"),
+        Duration::from_millis(5),
+        Arc::new(|| {}),
+    ));
+    until(|| state.ticks.load(Ordering::Relaxed) > 2).await;
+    intents.request_init();
+    until(|| state.home_start.load_full().is_some_and(|r| r.ready)).await;
+    let result: proto::IntentResult = dispatch(
+        &state,
+        &intents,
+        proto::Id::Number(11),
+        &proto::Call::RobotEnable(proto::EnableParams {
+            on: true,
+            toggle: false,
+        }),
+    )
+    .result_as()
+    .unwrap();
+    assert!(result.accepted);
+    until(|| bus_status(&state).is_some_and(|r| r["scale_use"] == "hold")).await;
+    (state, intents, trace, current, task)
+}
+
+/// `fall_action = "relax"`: the fall the default leaves to the policy is cut at the fall
+/// verdict — one torque-off — and the robot stays limp until someone enables it again.
+#[tokio::test]
+async fn fall_action_relax_cuts_torque_once_down_and_stays_limp() {
+    let (state, intents, trace, current, task) =
+        driving_joint_model(params::FallAction::Relax, 4000).await;
+    let before = state.ticks.load(Ordering::Relaxed);
+    until(|| state.ticks.load(Ordering::Relaxed) > before + 40).await;
+    assert_eq!(
+        trace.lock().unwrap().torque,
+        [true],
+        "upright must not trip"
+    );
+    current.lock().unwrap().imu.gravity = [1.0, 0.0, 0.0];
+    until(|| trace.lock().unwrap().torque == [true, false]).await;
+    assert!(state.fallen.load(Ordering::Relaxed));
+    assert!(!intents.enabled(), "relax clears the enable flag");
+    // And it stays down: no automatic re-enable, HOME or retry.
+    let after = state.ticks.load(Ordering::Relaxed);
+    until(|| state.ticks.load(Ordering::Relaxed) > after + 60).await;
+    assert_eq!(trace.lock().unwrap().torque, [true, false]);
+    state.shutdown.store(true, Ordering::Relaxed);
+    task.await.unwrap();
+}
+
+/// `fall_action = "relax_after_retry"`: the policy keeps driving the fallen robot for
+/// `fall_retry_ms`, and only then is torque cut.
+#[tokio::test]
+async fn fall_action_retry_lets_the_policy_try_before_relaxing() {
+    let (state, intents, trace, current, task) =
+        driving_joint_model(params::FallAction::RelaxAfterRetry, 600).await;
+    current.lock().unwrap().imu.gravity = [1.0, 0.0, 0.0];
+    until(|| state.fallen.load(Ordering::Relaxed)).await;
+    let latched = std::time::Instant::now();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        trace.lock().unwrap().torque,
+        [true],
+        "relaxed inside the retry window"
+    );
+    assert!(intents.enabled(), "still the policy's turn");
+    until(|| trace.lock().unwrap().torque == [true, false]).await;
+    assert!(
+        latched.elapsed() >= Duration::from_millis(500),
+        "relaxed {:?} after the fall verdict, retry is 600 ms",
+        latched.elapsed()
+    );
+    state.shutdown.store(true, Ordering::Relaxed);
+    task.await.unwrap();
+}
+
 /// A fallen HOME robot runs the uploaded LB network immediately. In particular,
 /// the expiration tick must not choose Walk even for one frame.
 #[tokio::test]

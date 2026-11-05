@@ -5,7 +5,8 @@ use super::{Ordering, RobotState};
 use clap::Subcommand;
 use duck_control::feetech::ImuMount;
 use duck_control::feetech::{
-    Bus, BusImuFreshness, BusImuInfo, Calibration, IMU_ID, ServoSample, signed_position_word,
+    Bus, BusImuFreshness, BusImuInfo, Calibration, IMU_ID, ServoSample, nearest_turn,
+    signed_position_word,
 };
 use duck_control::imu::{ImuData, SensorReading, SflpDecoder, TrunkFrame};
 use duck_control::model::{JOINT_IDS, NUM_JOINTS};
@@ -401,8 +402,10 @@ fn capture(
     let sample = samples
         .get(&id)
         .ok_or_else(|| format!("ID {id} is not a configured joint"))?;
-    let zero =
-        f64::from(sample.feedback.position_raw) - f64::from(direction) * angle_deg / 360.0 * 4096.0;
+    // HD1910 counts turns: the zero is a single-turn encoder value, so solve it from the
+    // reading taken modulo one revolution.
+    let zero = f64::from(sample.feedback.position_raw.rem_euclid(4096))
+        - f64::from(direction) * angle_deg / 360.0 * 4096.0;
     if !(0.0..=4095.0).contains(&zero) {
         return Err("calculated zero is outside 0..4095; check angle and direction".into());
     }
@@ -445,6 +448,8 @@ struct Motion {
     active_id: u8,
     from: i32,
     target: u16,
+    /// `target` in the turn the servo reported at Preload (see `nearest_turn`).
+    goal: i32,
     started: Instant,
     duration: Duration,
     reply: oneshot::Sender<Reply>,
@@ -573,6 +578,20 @@ fn step_hold(
                     .map(|id| (*id, samples[id].feedback.position_signed_raw))
                     .collect::<Vec<_>>();
                 h.from = ids.iter().map(|id| samples[id].feedback.position_raw).collect();
+                // HOME in the turn each servo reports, so a counter a revolution off ramps
+                // the short way rather than through a full turn.
+                for ((target, from), id) in h.targets.iter_mut().zip(&h.from).zip(ids) {
+                    let near = nearest_turn(*target, *from);
+                    if near != *target {
+                        tracing::warn!(
+                            id = *id,
+                            raw = *from,
+                            "hold-home: servo reads a turn away from its calibration; ramping \
+                             the short way"
+                        );
+                    }
+                    *target = near;
+                }
                 bus.signed_positions(&rows).map_err(|e| e.to_string())?;
                 h.stage = HoldStage::Enable;
             }
@@ -977,6 +996,7 @@ fn process_job(
                 active_id: id,
                 from: samples[&id].feedback.position_raw,
                 target: position,
+                goal: i32::from(position),
                 started: Instant::now(),
                 duration: Duration::from_millis(duration_ms),
                 reply: job.reply,
@@ -1022,6 +1042,7 @@ fn process_job(
                 active_id: id,
                 from: samples[&id].feedback.position_raw,
                 target: 2048,
+                goal: 2048,
                 started: Instant::now(),
                 duration: Duration::from_millis(duration_ms),
                 reply: job.reply,
@@ -1159,6 +1180,7 @@ fn step_motion(
             MotionStage::Preload => {
                 let feedback = &samples[&m.active_id].feedback;
                 m.from = feedback.position_raw;
+                m.goal = nearest_turn(i32::from(m.target), m.from);
                 bus.signed_positions(&[(m.active_id, feedback.position_signed_raw)])
                     .map_err(|e| e.to_string())?;
                 m.stage = MotionStage::ConfirmGoal;
@@ -1197,7 +1219,7 @@ fn step_motion(
                 let elapsed = m.started.elapsed();
                 let fraction = (elapsed.as_secs_f64() / m.duration.as_secs_f64()).min(1.0);
                 let target = (f64::from(m.from)
-                    + (f64::from(m.target) - f64::from(m.from)) * fraction)
+                    + (f64::from(m.goal) - f64::from(m.from)) * fraction)
                     .round() as i32;
                 if m.last_target != Some(target) {
                     bus.signed_positions(&[(m.active_id, target)])
@@ -1208,7 +1230,7 @@ fn step_motion(
                     && samples[&m.active_id]
                         .feedback
                         .position_signed_raw
-                        .abs_diff(i32::from(m.target))
+                        .abs_diff(m.goal)
                         <= u32::from(POSITION_TOLERANCE)
                 {
                     m.stage = MotionStage::Disable;
@@ -1927,7 +1949,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn workbench_moves_from_signed_feedback_to_the_requested_positive_target() {
+    fn workbench_moves_from_signed_feedback_to_the_request_in_the_measured_turn() {
         use duck_control::feetech::{READ, SYNC_WRITE, packet};
         use std::fs::File;
         use std::io::{Read, Write};
@@ -2010,6 +2032,7 @@ mod tests {
             active_id: 22,
             from: -1323,
             target: 2276,
+            goal: 2276,
             started: Instant::now(),
             duration: Duration::from_secs(1),
             reply,
@@ -2038,19 +2061,21 @@ mod tests {
             [(42, vec![0x2b, 0x85, 0, 0, 0, 0]), (40, vec![1])]
         );
         motion.as_mut().unwrap().started = Instant::now() - Duration::from_secs(1);
-        // Arrival uses the requested raw value, never its modulo-equivalent.
+        // The goal is the requested position in the turn the servo reports: from -1323 the
+        // requested 2276 is -1820, a 497-count move rather than a revolution, and arrival is
+        // judged against it.
+        assert_eq!(motion.as_ref().unwrap().goal, -1820);
         samples.insert(22, sample(-1820));
         step_motion(&mut bus, &samples, &[22], &mut motion, &mut off_pending);
-        assert!(matches!(
-            motion.as_ref().unwrap().stage,
-            MotionStage::Moving
-        ));
         assert_eq!(
             bus.read_control(22, 42, 6).unwrap(),
-            [0xe4, 0x08, 0, 0, 0, 0]
+            [0x1c, 0x87, 0, 0, 0, 0]
         );
-        samples.insert(22, sample(2276));
-        for _ in 0..3 {
+        assert!(matches!(
+            motion.as_ref().unwrap().stage,
+            MotionStage::Disable
+        ));
+        for _ in 0..2 {
             step_motion(&mut bus, &samples, &[22], &mut motion, &mut off_pending);
         }
         assert!(motion.is_none() && off_pending.is_none());

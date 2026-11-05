@@ -1011,6 +1011,19 @@ pub fn signed_position_word(position: i32) -> Result<u16> {
     Ok(position.unsigned_abs() as u16 | if position < 0 { 0x8000 } else { 0 })
 }
 
+/// `value` moved by whole turns (4096 counts) to its representation nearest `reference`.
+///
+/// HD1910 keeps counting turns in its position register even with the single-turn angle
+/// limits (registers 9/11 = 0/4095). A joint whose encoder seam lay on the other side at
+/// power-up, or that has crossed it since, reads 4096 counts away from the same physical
+/// position: both hip pitch joints of a replica read one turn low and one turn high while
+/// standing, and a HOME ramp in the raw coordinate swung each leg through a full revolution.
+/// Angles and goals are therefore taken modulo one turn. A joint that really did rotate a
+/// whole turn is no longer unwound by the servo; its cable has to be unwound by hand.
+pub fn nearest_turn(value: i32, reference: i32) -> i32 {
+    value + 4096 * (reference - value + 2048).div_euclid(4096)
+}
+
 fn signed_position_command(position: i32) -> Result<[u8; 6]> {
     let p = signed_position_word(position)?.to_le_bytes();
     Ok([p[0], p[1], 0, 0, 0, 0])
@@ -1282,8 +1295,15 @@ pub struct JointCalibration {
     pub max_rad: Option<f64>,
 }
 impl JointCalibration {
+    /// The joint angle of a native reading, taken in the turn nearest the calibrated zero
+    /// (see [`nearest_turn`]), so always within half a revolution of zero.
     pub fn position_rad(&self, raw: i32) -> f64 {
+        let raw = nearest_turn(raw, i32::from(self.zero_raw));
         (f64::from(raw) - f64::from(self.zero_raw)) * TAU / 4096.0 * f64::from(self.direction)
+    }
+    /// Whole turns a native reading sits away from the calibrated window.
+    pub fn turns(&self, raw: i32) -> i32 {
+        (raw - nearest_turn(raw, i32::from(self.zero_raw))) / 4096
     }
     fn raw_position(&self, radians: f64) -> f64 {
         f64::from(self.zero_raw) + radians * f64::from(self.direction) * 4096.0 / TAU
@@ -1804,6 +1824,8 @@ pub struct FeetechIo {
     partial_samples_total: u64,
     latest_partial: bool,
     latest_native_positions: Option<[i32; NUM_JOINTS]>,
+    /// Whole turns each joint last read away from its calibrated window; logged on change.
+    joint_turns: [i32; NUM_JOINTS],
     latest_joints: Vec<FeetechJointDiagnostic>,
     torque_enabled: bool,
     command_enabled: bool,
@@ -1912,6 +1934,7 @@ impl FeetechIo {
             partial_samples_total: 0,
             latest_partial: false,
             latest_native_positions: None,
+            joint_turns: [0; NUM_JOINTS],
             latest_joints: Vec::new(),
             torque_enabled: false,
             command_enabled: false,
@@ -2099,6 +2122,29 @@ impl FeetechIo {
             } else {
                 f64::NAN
             };
+            if joint.calibrated && fresh[i] {
+                let turns = joint.turns(fb.position_raw);
+                if turns != self.joint_turns[i] {
+                    if turns == 0 {
+                        tracing::info!(
+                            id = joint.id,
+                            joint = %joint.name,
+                            raw = fb.position_raw,
+                            "back in its calibrated turn"
+                        );
+                    } else {
+                        tracing::warn!(
+                            id = joint.id,
+                            joint = %joint.name,
+                            raw = fb.position_raw,
+                            turns,
+                            "reads whole turns away from its calibration; angles and goals use \
+                             the nearest turn (if the joint really rotated, unwind its cable)"
+                        );
+                    }
+                    self.joint_turns[i] = turns;
+                }
+            }
             out.velocities[i] = if !fresh[i] {
                 let previous = self.joint_feedback[i].as_ref().unwrap();
                 if self.joint_holding(i, started) {
@@ -2246,6 +2292,9 @@ impl RobotIo for FeetechIo {
             return Err(error("Feetech target must be finite"));
         }
         let held = self.held_joint_positions();
+        let measured = self
+            .latest_native_positions
+            .ok_or_else(|| error("Feetech target write requires measured positions"))?;
         let mut clamps = 0;
         let rows = self
             .calibration
@@ -2258,7 +2307,8 @@ impl RobotIo for FeetechIo {
                 if clamped {
                     clamps += 1;
                 }
-                Ok((joint.id, i32::from(raw)))
+                // The calibrated single-turn target, sent in the turn the servo reports.
+                Ok((joint.id, nearest_turn(i32::from(raw), measured[i])))
             })
             .collect::<Result<Vec<_>>>()?;
         self.bus.signed_positions(&rows)?;
@@ -2583,7 +2633,7 @@ mod tests {
     }
 
     #[test]
-    fn position_feedback_and_angles_keep_the_unmodified_signed_coordinate() {
+    fn position_feedback_keeps_the_signed_coordinate_and_angles_the_nearest_turn() {
         for (wire, expected) in [
             (0u16, 0),
             (1412, 1412),
@@ -2608,10 +2658,36 @@ mod tests {
         let c = calibrated();
         for id in [12, 22] {
             let joint = c.joints.iter().find(|j| j.id == id).unwrap();
+            let zero = i32::from(joint.zero_raw);
             for position in [-32767, -4095, -1412, -1, 4096, 32767] {
-                let expected = (f64::from(position) - f64::from(joint.zero_raw)) * TAU / 4096.0
+                // Angles are taken in the turn nearest the calibrated zero.
+                let single = nearest_turn(position, zero);
+                assert!((zero - 2047..=zero + 2048).contains(&single));
+                assert_eq!((position - single) % 4096, 0);
+                let expected = (f64::from(single) - f64::from(joint.zero_raw)) * TAU / 4096.0
                     * f64::from(joint.direction);
                 assert_eq!(joint.position_rad(position), expected);
+                assert_eq!(joint.position_rad(position + 4096), expected);
+                assert_eq!(joint.turns(position), (position - single) / 4096);
+            }
+        }
+    }
+
+    #[test]
+    fn nearest_turn_picks_the_representation_within_half_a_turn() {
+        // Both hip pitch joints of a replica while standing: one turn low, one turn high.
+        assert_eq!(nearest_turn(-1339, 2048), 2757);
+        assert_eq!(nearest_turn(5460, 2048), 1364);
+        // A HOME goal follows the turn the servo reports instead of driving a revolution.
+        assert_eq!(nearest_turn(2347, -1339), -1749);
+        assert_eq!(nearest_turn(2276, -1820), -1820);
+        assert_eq!(nearest_turn(1500, -1), 1500);
+        for reference in [-6048, -1820, -1, 0, 1977, 4095, 6244] {
+            for value in (-12_000..12_000).step_by(997) {
+                let near = nearest_turn(value, reference);
+                assert_eq!((value - near) % 4096, 0);
+                assert!((reference - 2047..=reference + 2048).contains(&near));
+                assert_eq!(nearest_turn(value + 4096, reference), near);
             }
         }
     }
@@ -4252,7 +4328,7 @@ mod hd1910_transport_tests {
     }
 
     #[test]
-    fn negative_feedback_preloads_itself_but_home_targets_stay_calibrated_positive() {
+    fn negative_feedback_preloads_itself_and_home_goals_stay_in_the_measured_turn() {
         let (bus, device) = emulator(false);
         let mut c = calibration();
         c.joints[index(22)].zero_raw = 1977;
@@ -4294,8 +4370,10 @@ mod hd1910_transport_tests {
                 );
             }
         }
-        // Exercise the HOME-shaped path through the real writer. Mechanical limits
-        // still apply, but negative feedback must never select a different target turn.
+        // Exercise the HOME-shaped path through the real writer. Mechanical limits still
+        // apply; each goal is the calibrated target in the turn the servo reports, so a
+        // counter a revolution off never drives a full turn.
+        let native = io.latest_native_positions.unwrap();
         let start = measured.positions;
         for step in 0..=50 {
             let target = std::array::from_fn(|i| {
@@ -4304,13 +4382,22 @@ mod hd1910_transport_tests {
             io.write(&JointTargets::new(target)).unwrap();
             let goals = io.bus.sync_read(42, 6, &ids).unwrap();
             for (i, id) in ids.into_iter().enumerate() {
-                let expected = c.joints[i].target_raw(target[i]).unwrap().0;
-                assert_eq!(goals[&id][..2], expected.to_le_bytes());
+                let raw = c.joints[i].target_raw(target[i]).unwrap().0;
+                let expected = nearest_turn(i32::from(raw), native[i]);
+                assert!((expected - native[i]).abs() <= 2048);
+                assert_eq!(
+                    goals[&id][..2],
+                    signed_position_word(expected).unwrap().to_le_bytes()
+                );
                 assert_eq!(goals[&id][2..], [0, 0, 0, 0]);
             }
         }
         let goals = io.bus.sync_read(42, 2, &ids).unwrap();
-        assert_eq!(goals[&22], 2276u16.to_le_bytes());
+        // HOME is 2276 for ID 22; it reads -1670, a turn low, so HOME is -1820 there.
+        assert_eq!(
+            goals[&22],
+            signed_position_word(-1820).unwrap().to_le_bytes()
+        );
         assert_eq!(goals[&12], 1500u16.to_le_bytes());
         assert!(
             device
@@ -4320,7 +4407,8 @@ mod hd1910_transport_tests {
                 .iter()
                 .all(|(_, address, _)| [40, 42, 48, 50, 51].contains(address))
         );
-        // A different raw revolution on re-arm or service restart never changes HOME.
+        // A joint reported a revolution away on re-arm or service restart is already at
+        // HOME: its goal is HOME in that turn, never a full revolution.
         io.set_torque(false).unwrap();
         device.regs.lock().unwrap()[22][56..58]
             .copy_from_slice(&signed_position_word(-1820).unwrap().to_le_bytes());
@@ -4330,7 +4418,7 @@ mod hd1910_transport_tests {
             .unwrap();
         assert_eq!(
             io.bus.sync_read(42, 2, &ids).unwrap()[&22],
-            2276u16.to_le_bytes()
+            signed_position_word(-1820).unwrap().to_le_bytes()
         );
         let mut restarted = FeetechIo::from_bus(io.bus, c).unwrap();
         for _ in 0..30 {
@@ -4346,7 +4434,10 @@ mod hd1910_transport_tests {
             .write(&JointTargets::new(crate::model::DEFAULT_POSITION))
             .unwrap();
         let goals = restarted.bus.sync_read(42, 2, &ids).unwrap();
-        assert_eq!(goals[&22], 2276u16.to_le_bytes());
+        assert_eq!(
+            goals[&22],
+            signed_position_word(-1820).unwrap().to_le_bytes()
+        );
         assert_eq!(goals[&12], 1500u16.to_le_bytes());
     }
 

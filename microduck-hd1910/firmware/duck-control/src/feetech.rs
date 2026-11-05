@@ -129,6 +129,8 @@ pub const BROADCAST: u8 = 254;
 pub const READ: u8 = 2;
 pub const WRITE: u8 = 3;
 pub const SYNC_READ: u8 = 0x82;
+/// DXL 2.0 PING (the IMU's status carries model number + firmware version).
+const DXL2_PING: u8 = 1;
 pub const SYNC_WRITE: u8 = 0x83;
 /// Budget for one complete 50 Hz telemetry transaction.
 /// Setup/torque verification and explicit read-only diagnostics keep their own budget.
@@ -265,6 +267,10 @@ pub struct Bus {
     imu_board: BusImuBoard,
     imu_protocol: BusImuProtocol,
     imu_identity: Option<Vec<u8>>,
+    /// The DXL2 board refused `READ 124/12` during `identify_imu` but served the same block to a
+    /// single-ID `SYNC_READ` (seller firmware that only answers what the official runtime
+    /// sends). Telemetry then keeps reading the block with `SYNC_READ`.
+    imu_dxl2_sync: bool,
 }
 
 /// Minimal acquisition result. No recovery, raw-packet history or UART polling.
@@ -304,6 +310,7 @@ impl Bus {
             imu_board: BusImuBoard::Ft6,
             imu_protocol: BusImuProtocol::Auto,
             imu_identity: None,
+            imu_dxl2_sync: false,
         })
     }
 
@@ -311,6 +318,7 @@ impl Bus {
     /// telemetry Sync Read. Anything else is refused.
     pub fn identify_imu(&mut self) -> Result<BusImuBoard> {
         self.imu_identity = None;
+        self.imu_dxl2_sync = false;
         let mut feetech_failure = None;
         if self.imu_protocol != BusImuProtocol::Dxl2 {
             match self.read(IMU_ID, 0, 5) {
@@ -327,18 +335,43 @@ impl Bus {
                 Err(problem) => feetech_failure = Some(problem),
             }
         }
-        match self.dxl2_read(0, 3, Instant::now() + self.timeout) {
-            Ok(raw) => {
-                let core = self.dxl2_read(124, 12, Instant::now() + self.timeout)?;
-                ImuSample::decode_dxl2(&core)?;
-                self.imu_board = BusImuBoard::Dxl2;
-                self.imu_identity = Some(raw);
-                Ok(self.imu_board)
+        // Identity: READ 0/3 (model number + firmware version). Seller firmware that only serves
+        // the official runtime's requests refuses it (status 0x04), so fall back to PING, whose
+        // status parameters are the same three bytes.
+        let identity = match self.dxl2_read(0, 3, Instant::now() + self.timeout) {
+            Ok(raw) => raw,
+            Err(read_problem) => match self.dxl2_ping(Instant::now() + self.timeout) {
+                Ok(raw) => {
+                    tracing::info!("DXL2 IMU200 identity read by PING; READ 0/3 failed: {read_problem}");
+                    raw
+                }
+                Err(ping_problem) => {
+                    return Err(error(format!(
+                        "IMU ID 200 detection failed: Feetech {feetech_failure:?}; DXL2 {read_problem}; DXL2 PING {ping_problem}"
+                    )));
+                }
+            },
+        };
+        // The 124/12 block: READ, or a single-ID SYNC_READ of the same block if READ is refused.
+        let core = match self.dxl2_read(124, 12, Instant::now() + self.timeout) {
+            Ok(core) => core,
+            Err(read_problem) => {
+                let core = self
+                    .dxl2_sync_read(124, 12, Instant::now() + self.timeout)
+                    .map_err(|sync_problem| {
+                        error(format!(
+                            "DXL2 IMU200 124/12 block: READ {read_problem}; SYNC_READ {sync_problem}"
+                        ))
+                    })?;
+                tracing::info!("DXL2 IMU200 block read by SYNC_READ; READ 124/12 failed: {read_problem}");
+                self.imu_dxl2_sync = true;
+                core
             }
-            Err(problem) => Err(error(format!(
-                "IMU ID 200 detection failed: Feetech {feetech_failure:?}; DXL2 {problem}"
-            ))),
-        }
+        };
+        ImuSample::decode_dxl2(&core)?;
+        self.imu_board = BusImuBoard::Dxl2;
+        self.imu_identity = Some(identity);
+        Ok(self.imu_board)
     }
 
     pub fn set_imu_protocol(&mut self, value: &str) -> Result<()> {
@@ -349,6 +382,7 @@ impl Bus {
             _ => return Err(error("IMU protocol must be auto, feetech or dxl2")),
         };
         self.imu_identity = None;
+        self.imu_dxl2_sync = false;
         Ok(())
     }
 
@@ -361,6 +395,38 @@ impl Bus {
     }
 
     fn dxl2_read(&mut self, address: u16, length: u16, deadline: Instant) -> Result<Vec<u8>> {
+        let params = [address.to_le_bytes(), length.to_le_bytes()].concat();
+        self.dxl2_request(crate::dxl2::packet(IMU_ID, READ, &params), address, length, deadline)
+    }
+
+    /// DXL2 PING. The status parameters are the model number (2 bytes) and firmware version.
+    fn dxl2_ping(&mut self, deadline: Instant) -> Result<Vec<u8>> {
+        self.dxl2_request(crate::dxl2::packet(IMU_ID, DXL2_PING, &[]), 0, 3, deadline)
+    }
+
+    /// Single-ID DXL2 SYNC_READ, for firmware that serves the block only this way.
+    fn dxl2_sync_read(&mut self, address: u16, length: u16, deadline: Instant) -> Result<Vec<u8>> {
+        let params = [&address.to_le_bytes()[..], &length.to_le_bytes()[..], &[IMU_ID][..]].concat();
+        self.dxl2_request(crate::dxl2::packet(BROADCAST, SYNC_READ, &params), address, length, deadline)
+    }
+
+    /// The 124/12 IMU block, requested the way `identify_imu` found the board serves it.
+    fn dxl2_core(&mut self, deadline: Instant) -> Result<Vec<u8>> {
+        if self.imu_dxl2_sync {
+            self.dxl2_sync_read(124, 12, deadline)
+        } else {
+            self.dxl2_read(124, 12, deadline)
+        }
+    }
+
+    /// One DXL2 request to ID 200 and its status reply of `length` parameter bytes.
+    fn dxl2_request(
+        &mut self,
+        request: Vec<u8>,
+        address: u16,
+        length: u16,
+        deadline: Instant,
+    ) -> Result<Vec<u8>> {
         let started = Instant::now();
         let mut trace = SyncTrace {
             address: address as u8,
@@ -370,8 +436,7 @@ impl Bus {
         };
         let mut decoder = crate::dxl2::Decoder::default();
         let result = (|| {
-            let params = [address.to_le_bytes(), length.to_le_bytes()].concat();
-            self.send(&crate::dxl2::packet(IMU_ID, READ, &params), deadline)?;
+            self.send(&request, deadline)?;
             trace.request_sent = true;
             let mut chunk = [0u8; 128];
             while Instant::now() < deadline {
@@ -792,7 +857,7 @@ impl Bus {
     ) -> Result<BTreeMap<u8, Vec<u8>>> {
         let started = Instant::now();
         let deadline = started + Duration::from_millis(TELEMETRY_DEADLINE_MS);
-        let raw = match self.dxl2_read(124, 12, deadline) {
+        let raw = match self.dxl2_core(deadline) {
             Ok(raw) => raw,
             Err(problem) => {
                 // Totals describe one telemetry acquisition, including an
@@ -835,7 +900,7 @@ impl Bus {
 
     pub fn imu(&mut self) -> Result<ImuSample> {
         if self.imu_board == BusImuBoard::Dxl2 {
-            let raw = self.dxl2_read(124, 12, Instant::now() + self.timeout)?;
+            let raw = self.dxl2_core(Instant::now() + self.timeout)?;
             return ImuSample::decode_dxl2(&raw);
         }
         ImuSample::decode_diagnostic(&self.read(
@@ -2738,6 +2803,7 @@ mod tests {
             imu_board: BusImuBoard::Ft6,
             imu_protocol: BusImuProtocol::Auto,
             imu_identity: None,
+            imu_dxl2_sync: false,
         };
         let mut io = FeetechIo::from_bus(bus, calibrated()).unwrap();
         for _ in 0..30 {
@@ -2834,6 +2900,7 @@ mod tests {
                 imu_board: BusImuBoard::Ft6,
                 imu_protocol: BusImuProtocol::Auto,
                 imu_identity: None,
+                imu_dxl2_sync: false,
             };
             let result = bus.telemetry(&crate::model::JOINT_IDS);
             finish.send(()).unwrap();
@@ -2887,6 +2954,7 @@ mod tests {
             imu_board: BusImuBoard::Ft6,
             imu_protocol: BusImuProtocol::Auto,
             imu_identity: None,
+            imu_dxl2_sync: false,
         };
         bus.verify_torque(&ids, false).unwrap();
         assert!(bus.last_sync.missing_ids.is_empty());
@@ -3539,6 +3607,7 @@ mod hd1910_transport_tests {
                 imu_board: BusImuBoard::Ft6,
                 imu_protocol: BusImuProtocol::Auto,
                 imu_identity: None,
+                imu_dxl2_sync: false,
             },
             Emulator {
                 faults,

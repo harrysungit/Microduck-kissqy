@@ -79,6 +79,11 @@ pub fn firmware_p() -> u8 {
     FIRMWARE_P.get().copied().unwrap_or(5)
 }
 pub fn install(c: &Contract) -> Result<(), String> {
+    // Installing the contract that is already in place is not a conflict: tests that share one
+    // process load the same deployment more than once. A different contract still is.
+    if HOME.get() == Some(&c.home) && FIRMWARE_P.get() == Some(&c.firmware_p) {
+        return Ok(());
+    }
     HOME.set(c.home)
         .map_err(|_| "deployment Home already initialized".to_string())?;
     FIRMWARE_P

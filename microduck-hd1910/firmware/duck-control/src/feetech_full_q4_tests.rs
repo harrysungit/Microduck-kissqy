@@ -108,6 +108,7 @@ fn peer(identity: [u8; 5], desc: [u8; 8], delay_ms: u64) -> (Bus, Peer) {
             imu_board: BusImuBoard::Ft6,
             imu_protocol: BusImuProtocol::Auto,
             imu_identity: None,
+            imu_dxl2_sync: false,
             imu_profile: BusImuProfile::Legacy,
             observations: observations::Observations::default(),
             last_imu_response_at: None,

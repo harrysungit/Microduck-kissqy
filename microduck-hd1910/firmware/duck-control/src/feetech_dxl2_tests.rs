@@ -43,6 +43,10 @@ enum Fault {
     TrailingCrc,
     ForeignPrefixAndMissingServo,
     ChangingCore,
+    /// Seller DXL2 firmware: PING and the 124/12 block only; READ 0/3 gets status 0x04.
+    SellerFirmware,
+    /// As SellerFirmware, but READ 124/12 is refused too; only SYNC_READ serves the block.
+    SellerFirmwareSyncOnly,
 }
 
 fn peer_fault(
@@ -86,6 +90,23 @@ fn peer_fault(
             seen.lock().unwrap().push(tx.clone());
             if dxl {
                 if protocol != BusImuProtocol::Dxl2 {
+                    continue;
+                }
+                if matches!(fault, Fault::SellerFirmware | Fault::SellerFirmwareSyncOnly) {
+                    let address = || u16::from_le_bytes([tx[8], tx[9]]);
+                    let (error, payload) = match tx[7] {
+                        DXL2_PING => (0, vec![0x2c, 0x01, 0x03]),
+                        READ if address() == 0 => (4, Vec::new()),
+                        READ if matches!(fault, Fault::SellerFirmwareSyncOnly) => (4, Vec::new()),
+                        READ | SYNC_READ if address() == 124 => (0, core()),
+                        _ => (4, Vec::new()),
+                    };
+                    std::thread::sleep(imu_delay);
+                    let _ = device.write_all(&crate::dxl2::packet(
+                        IMU_ID,
+                        0x55,
+                        &[&[error][..], &payload].concat(),
+                    ));
                     continue;
                 }
                 let address = u16::from_le_bytes([tx[8], tx[9]]);
@@ -191,6 +212,7 @@ fn peer_fault(
             last_imu_response_at: None,
         full_q4: false,
         full_q4_verified: false,
+        imu_dxl2_sync: false,
     };
     (
         bus,
@@ -592,4 +614,71 @@ fn an_unsent_servo_request_does_not_become_fifteen_missing_responses() {
     totals.observe(&bus.last_sync, Some("injected write failure".into()));
     assert_eq!((totals.total_reads, totals.failed_reads), (1, 1));
     assert!(totals.missing_by_id.is_empty());
+}
+
+fn dxl2_requests(device: &Peer) -> Vec<Vec<u8>> {
+    let tx = device.requests.lock().unwrap();
+    tx.iter()
+        .filter(|p| p.starts_with(&crate::dxl2::HEADER))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn seller_dxl2_firmware_refusing_address_0_is_identified_by_ping() {
+    let (mut bus, device) = peer_fault(
+        BusImuProtocol::Dxl2,
+        Duration::ZERO,
+        Duration::ZERO,
+        Fault::SellerFirmware,
+    );
+    assert_eq!(bus.identify_imu().unwrap(), BusImuBoard::Dxl2);
+    assert_eq!(bus.imu_info().unwrap().identity, vec![0x2c, 0x01, 0x03]);
+    assert!(!bus.imu_dxl2_sync);
+    let blocks = bus.telemetry(&crate::model::JOINT_IDS).unwrap();
+    assert_eq!(blocks[&IMU_ID], core());
+    let dxl = dxl2_requests(&device);
+    assert_eq!(dxl[0], crate::dxl2::packet(IMU_ID, READ, &[0, 0, 3, 0]));
+    assert_eq!(dxl[1], crate::dxl2::packet(IMU_ID, DXL2_PING, &[]));
+    // detection and telemetry both READ the block once the board serves READ 124/12
+    assert!(
+        dxl[2..]
+            .iter()
+            .all(|p| *p == crate::dxl2::packet(IMU_ID, READ, &[124, 0, 12, 0]))
+    );
+    assert_eq!(dxl.len(), 4);
+}
+
+#[test]
+fn seller_dxl2_firmware_that_only_serves_sync_read_is_polled_with_sync_read() {
+    let (mut bus, device) = peer_fault(
+        BusImuProtocol::Dxl2,
+        Duration::ZERO,
+        Duration::ZERO,
+        Fault::SellerFirmwareSyncOnly,
+    );
+    bus.read_only = true; // PING and SYNC_READ are read instructions
+    assert_eq!(bus.identify_imu().unwrap(), BusImuBoard::Dxl2);
+    assert!(bus.imu_dxl2_sync);
+    let blocks = bus.telemetry(&crate::model::JOINT_IDS).unwrap();
+    assert_eq!(blocks[&IMU_ID], core());
+    assert!(bus.imu().is_ok());
+    let sync = crate::dxl2::packet(BROADCAST, SYNC_READ, &[124, 0, 12, 0, IMU_ID]);
+    let dxl = dxl2_requests(&device);
+    assert_eq!(dxl.last().unwrap(), &sync);
+    assert_eq!(dxl.iter().filter(|p| **p == sync).count(), 3); // detection, telemetry, imu()
+}
+
+#[test]
+fn changing_the_imu_protocol_forgets_the_sync_read_choice() {
+    let (mut bus, _device) = peer_fault(
+        BusImuProtocol::Dxl2,
+        Duration::ZERO,
+        Duration::ZERO,
+        Fault::SellerFirmwareSyncOnly,
+    );
+    bus.identify_imu().unwrap();
+    assert!(bus.imu_dxl2_sync);
+    bus.set_imu_protocol("dxl2").unwrap();
+    assert!(!bus.imu_dxl2_sync);
 }

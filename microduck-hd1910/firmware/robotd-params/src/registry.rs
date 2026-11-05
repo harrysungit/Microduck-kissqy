@@ -373,6 +373,21 @@ pub const REGISTRY: &[Entry] = &[
         Kind::Integer,
         "Gain for that ramp — softened standing, not limp",
     ),
+    feature(
+        "safety.fall_action",
+        Kind::Choice(&["policy", "relax", "relax_after_retry"]),
+        "Once down while a policy drives: leave it to the policy, relax, or relax after a retry",
+    ),
+    entry(
+        "safety.fall_retry_ms",
+        Kind::Integer,
+        "With relax_after_retry: how long the policy may try to get up",
+    ),
+    entry(
+        "safety.fall_upright_ms",
+        Kind::Integer,
+        "How long upright before a retry clock resets",
+    ),
     // ── [duck_detector] ──────────────────────────────────────────────────────
     feature(
         "duck_detector.enabled",
@@ -742,6 +757,7 @@ mod tests {
                 "policy.voltage_adapt",
                 "safety.battery_empty_shutdown",
                 "safety.limp_fall",
+                "safety.fall_action",
                 "duck_detector.enabled",
                 "chorale.accept",
                 "theremin.enabled",
